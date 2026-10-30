@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# 生成的数据集产物（体量大，由 manifest 中的 sha256 做完整性校验）
+datasets/
