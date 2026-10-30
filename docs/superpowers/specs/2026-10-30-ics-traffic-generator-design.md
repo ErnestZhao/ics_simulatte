@@ -86,16 +86,35 @@ Scapy 类名中的功能码是**十六进制**（`ModbusPDU10` = FC 0x10 = 16）
 | 15 (0x0F) | **Write Multiple Coils** | **高** —— 工业界最常用的写操作之一 |
 | 18 (0x12) | Read File Record | 中 |
 
-**决策**：Modbus 编码层仍以 Scapy 为基座（不重写已正确的部分），在 `icsgen/protocols/modbus/` 适配器层**补充实现这 4 个缺失功能码**（约 100 行）。适配器统一返回 `bytes`，因此 Scapy 类与自研类可自由混用。
+诊断功能码 FC0x08 的子功能：Scapy 覆盖 15 个，规范全量约 20 个，缺 0x05 Change Byte Count、0x06 Change Word Count、0x08 Get/Modify Modbus Plus Parameters、0x15 Get Clear Modbus Plus Request。
 
-Scapy 另提供 `ModbusPDUReservedFunctionCode*` 与 `ModbusPDUUserDefinedFunctionCode*`，可直接用于构造任意功能码，是"非法功能码"异常语义的基础。
+Scapy **已实现** MEI 功能码 0x2B（子类型 0x0E Read Device Identification，含 Request/Response/Error 三类），无需自研。
 
-### 4.4 Scapy 的保留职责
+Scapy 另提供 `ModbusPDUReservedFunctionCode*` 与 `ModbusPDUUserDefinedFunctionCode*`，可用于构造任意功能码，是"非法功能码"异常语义的参考。
 
-即便自研 Modbus 缺失功能码，Scapy 仍承担：
+### 4.4 关键设计决策：自研字段表驱动的编解码内核
 
-- Ethernet / IP / TCP / UDP 链路封装（这部分可靠且被广泛验证）
-- **独立的第三方解析器**，用于交叉验证自研编码的正确性（golden 测试中，自研编 → Scapy 解 → 断言语义等价）
+Scapy 的 Modbus PDU 是**固定的 Packet 类**（每功能码一个类，字段写死在 `fields_desc` 中）。这带来两个后果：
+
+1. 缺失的 4 个功能码、4 个诊断子功能**无法**通过 Scapy 表达
+2. **catalog 无法驱动编码** —— 每个操作类型的参数布局都硬编码在 Scapy 类里，catalog 只能声明元数据。诊断子功能的 20 种布局、Modbus 各功能码的参数差异，都得写成 Python 代码而非 YAML 声明
+
+这与 §8「catalog 是操作类型的唯一事实源」直接冲突。若坚持 Scapy 基座，37 个操作类型就意味着 37 个硬编码构建函数，catalog 沦为文档。
+
+**决策**：P1 自研一个**字段表驱动的二进制编解码内核**（`icsgen/codec/`，约 250 行），catalog 中的字段布局声明直接驱动编码与解码。
+
+- 内核支持的字段类型：`uint8` `uint16` `uint32` `int16` `int32` `bytes` `array[T]` `bitfield`，以及 `count_of` / `count_from` / `adjust` 三个可组合的修饰符（覆盖 Modbus 的 byteCount 语义）
+- Modbus 是该内核的第一个使用者；P2 的 CIP、P3 的 S7 复用同一内核
+- 不引入 `construct` 等二进制 DSL 库 —— 所需字段类型有限，自研更可控且跨协议复用无绑定
+
+### 4.5 Scapy 的保留职责
+
+自研内核不替代 Scapy，Scapy 仍承担两块不可替代的价值：
+
+- **链路封装**：Ethernet / IP / TCP / UDP（可靠且被广泛验证）
+- **独立第三方解析器**：用于交叉验证自研内核的正确性 —— golden 测试中「自研编 → Scapy 解 → 断言语义等价」。同一份字节由两个独立实现解析并得出一致结论，这是比快照比对更强的正确性证据
+
+对于 Scapy 无法解析的报文（补齐的 4 个功能码等），交叉验证改用「自研解码器 + 规范逐字节对照」，并在测试中显式标注该报文未经第三方验证。
 
 ## 5. 总体架构
 
@@ -136,6 +155,10 @@ ics/
 ├── icsgen/
 │   ├── __init__.py
 │   ├── cli.py                       # Typer/Click 命令面
+│   ├── codec/                       # 字段表驱动的二进制编解码内核
+│   │   ├── fields.py                # 字段类型与修饰符定义
+│   │   ├── encoder.py               # 按字段表编码
+│   │   └── decoder.py               # 按字段表解码
 │   ├── spec/
 │   │   ├── model.py                 # Scenario / Operation / Tier / Variant
 │   │   ├── loader.py                # YAML → model，JSON Schema 校验
@@ -145,8 +168,9 @@ ics/
 │   │   ├── registry.py              # op 名 → adapter 路由
 │   │   └── modbus/
 │   │       ├── adapter.py           # Modbus TCP / RTU 适配器
-│   │       ├── builders.py          # 各功能码构建函数
-│   │       ├── missing_fc.py        # Scapy 缺失的 FC11/12/15/18 实现
+│   │       ├── layouts.py           # 功能码 → 字段布局（catalog 的数据来源）
+│   │       ├── framing.py           # MBAP / RTU 组帧
+│   │       ├── crc.py               # RTU CRC16
 │   │       └── catalog.yaml         # 操作目录
 │   ├── transport/
 │   │   ├── spec.py                  # TransportSpec
@@ -279,25 +303,25 @@ class ProtocolAdapter(Protocol):
 
 ### 7.1 Modbus 适配器要点
 
-- PDU 层直接复用 Scapy `contrib/modbus.py` 的类，**不重写**已正确的 15 个功能码
-- 补充实现 FC11 / FC12 / FC15 / FC18（§4.3）
-- TCP：`ModbusADURequest` + MBAP 头（事务 id、协议 id、长度、单元 id）
-- RTU：同一 PDU + CRC16 + RTU 帧（地址、PDU、CRC），CRC 实现自行核对（不依赖 Scapy 的 ADU 层细节）
+- PDU 编码由 §4.4 的**字段表驱动内核**完成，字段布局来自 `icsgen/protocols/modbus/layouts.py`（catalog 的数据来源）
+- 补齐 Scapy 缺失的 FC0x0B / 0x0C / 0x0F / 0x12 与诊断子功能 0x05 / 0x06 / 0x08 / 0x15
+- TCP：MBAP 头（事务 id、协议 id、长度、单元 id）+ PDU
+- RTU：地址 + PDU + CRC16，CRC 实现自行核对（不依赖 Scapy 的 ADU 层细节）
 - 语义元数据至少包含：`fc`、`unit_id`、`start_addr`、`quantity`、`values`
-- 异常响应（FC + 0x80）作为独立 variant 生成
+- 异常响应（FC | 0x80 + 异常码）作为独立 variant 生成
 
 ## 8. 操作目录（catalog）
 
 ### 8.1 格式
 
-catalog 是**唯一事实源**，位于 `icsgen/protocols/<proto>/catalog.yaml`：
+catalog 位于 `icsgen/protocols/<proto>/catalog.yaml`，声明**操作元数据与参数 schema**；**字段布局**位于同目录的 `layouts.py`，由 catalog 通过 `layout:` 字段名引用。布局放 Python 而非 YAML 的原因：诊断功能码的 20 个子功能共享同一字段布局、仅 `sub_function` 默认值不同，用 Python 可程序化批量生成，避免 YAML 里重复 20 遍。
 
 ```yaml
 protocol: modbus
 operations:
   - name: modbus.read_holding_registers
     summary: 读保持寄存器 (FC03)
-    builder: icsgen.protocols.modbus.builders:read_holding_registers
+    layout: fc03
     tier: legit
     variants: [normal, boundary, exception]
     params:
@@ -313,34 +337,54 @@ operations:
         default: 1
 ```
 
-新增操作类型 = 加一条 YAML + 一个构建函数，**不修改框架代码**。
+字段布局（`layouts.py` 中的等价声明）：
+
+```python
+LAYOUTS = {
+    "fc03": Layout(
+        request=[
+            Field("start_addr", "uint16"),
+            Field("quantity", "uint16"),
+        ],
+        response=[
+            Field("byte_count", "uint8", count_of="values"),
+            Field("values", "uint16", count_from="byte_count"),
+        ],
+    ),
+}
+```
+
+新增操作类型 = 加一条 catalog YAML（+ 必要时一个布局），**不修改框架代码**。
 
 ### 8.2 Modbus 首批条目（P1 目标 ≥ 90）
 
-**功能码全集（19 个）**，按 §4.3 的实测结论分为两组：
+**操作类型构成**：
 
-| 组别 | 功能码（十六进制） | 数量 |
+| 来源 | 说明 | 数量 |
 |---|---|---|
-| Scapy 已覆盖 | 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x10, 0x11, 0x14, 0x15, 0x16, 0x17, 0x18 | 15 |
-| 需自行补充 | 0x0B Get Comm Event Counter、0x0C Get Comm Event Log、0x0F Write Multiple Coils、0x12 Read File Record | 4 |
+| 规范功能码 | FC 0x01–0x08, 0x0B, 0x0C, 0x0F, 0x10, 0x11, 0x12, 0x14–0x18 | 19 |
+| MEI | FC 0x2B 子类型 0x0E Read Device Identification | 1 |
+| 诊断子功能 | FC 0x08 的 20 个子功能各自独立成一个操作类型 | 20 |
+| 协议级异常 | `modbus.illegal_function_code`（可指定 `raw_function_code`） | 1 |
+| **操作类型合计** | | **41** |
 
-**条目计数模型**：一条 catalog 条目 = 一个 (功能码, 变体) 组合，在 TCP 与 RTU 下各计一次。
+**条目计数模型**：一条 catalog 条目 = 一个 (操作类型, 变体, 传输) 组合。
 
-| 传输 | 变体 | 条目数 |
+| 变体 | 说明 | 适用性 |
 |---|---|---|
-| TCP | normal | 19 |
-| TCP | exception（协议异常响应） | 19 |
-| TCP | boundary（数量/地址越界） | 19 |
-| TCP | illegal_fc（非法/保留功能码） | 19 |
-| RTU | 同上四类 | 76 |
-| **合计** | | **152** |
+| `normal` | 规范内正常值 | 全部操作类型 |
+| `exception` | 协议异常响应（FC \| 0x80 + 异常码） | 全部操作类型 |
+| `boundary` | 参数取边界/越界值 | 仅参数型操作类型 |
 
-152 ≥ 90，满足 §15 指标。若 P1 实现中某些功能码的边界变体不适用（如 FC0x0B 通信事件计数器的边界语义不自然），该条目直接从 catalog 移除并相应下调阈值下限，**但不得低于 90**。
+计数（保守估计，仅 normal + exception）：
 
-**额外补充项**（提升真实度，不计入上述 152）：
+| 传输 | 条目数 |
+|---|---|
+| TCP | 41 × 2 = 82 |
+| RTU | 82 |
+| **合计** | **164** |
 
-- `modbus.device_identification` —— MEI 类型 0x0E Read Device Identification（功能码 0x2B），Scapy 无此实现，需在 `missing_fc.py` 中补充
-- `modbus.diagnostics` 子类型 —— FC0x08 的 17 个诊断子功能（ReturnQueryDataRequest / RestartCommunicationsOption / ReturnDiagnosticRegister / ChangeAsciiInputDelimiter / ForceListenOnlyMode / ClearCounters / ReturnBusMessageCount / ReturnBusCommunicationErrorCount / ReturnBusExceptionErrorCount / ReturnSlaveMessageCount / ReturnSlaveNoResponseCount / ReturnSlaveNAKCount / ReturnSlaveBusyCount / ReturnSlaveBusCharacterErrorCount / ReturnIopOverrunCount / ClearOverrunCount / GetClearModbusPlusRequest）作为独立 variant，而非一个笼统操作
+164 ≥ 90，满足 §15 指标且留有余量（boundary 变体与 MEI/诊断子功能的细分只会增加，不会减少）。若个别操作类型的变体在实现中不适用（如 FC0x07 Read Exception Status 无参数，boundary 无意义），从 catalog 移除该变体并相应下调，**但总数不得低于 90**。
 
 ### 8.3 语义变体
 
@@ -557,7 +601,7 @@ icsgen catalog    --protocol modbus --count        # 统计操作条目数（CI 
 
 | 依赖 | 版本 | 用途 |
 |---|---|---|
-| scapy | ≥ 2.6 | 链路封装 + 第三方交叉验证解析器 + Modbus PDU 基座 |
+| scapy | ≥ 2.6 | 链路封装 + 第三方交叉验证解析器（不再作为 Modbus PDU 基座，见 §4.4） |
 | pymodbus | ≥ 3.8 | Modbus 服务端模拟 |
 | pydantic | ≥ 2.0 | catalog 与场景的模型定义、校验；并由模型反向导出 JSON Schema |
 | jsonschema | ≥ 4.20 | 校验 catalog 声明的 `params_schema` 对用户传入的 `params` 是否合规 |
@@ -567,7 +611,9 @@ icsgen catalog    --protocol modbus --count        # 统计操作条目数（CI 
 
 校验链路分工：catalog 的元 schema 与场景结构由 pydantic 校验；用户传入的**操作参数**由 catalog 的 `params_schema` 经 jsonschema 校验。
 
-后续阶段追加：`python-snap7`（P3）、`asyncua`（P4）。`construct`（二进制编解码，P2/P3 自研 CIP/S7 时使用）按需引入。
+二进制编解码内核为**自研**（§4.4），不引入 `construct` 等二进制 DSL 库。
+
+后续阶段追加：`python-snap7`（P3）、`asyncua`（P4）。
 
 ## 18. 风险与缓解
 
