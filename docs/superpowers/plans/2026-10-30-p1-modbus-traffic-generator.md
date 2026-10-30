@@ -25,7 +25,7 @@
 - 所有随机性必须来自显式传入的 `seed`，同 seed + 同输入必得同输出
 - 每个任务结束前必须提交，提交信息末尾附 `Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>`
 - 不得提交 `datasets/` 目录内容（已在 `.gitignore` 中）
-- 测试命令统一为 `python -m pytest tests/<path> -v`，在项目根目录 `/home/szhao/ics` 执行
+- 测试命令统一为 `python3 -m pytest tests/<path> -v`，在项目根目录 `/home/szhao/ics` 执行
 
 ---
 
@@ -170,7 +170,7 @@ def test_scenario_is_immutable_container():
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `python -m pytest tests/test_spec_model.py -v`
+Run: `python3 -m pytest tests/test_spec_model.py -v`
 Expected: FAIL —— `ModuleNotFoundError: No module named 'icsgen'`
 
 - [ ] **Step 3: 写最小实现**
@@ -319,7 +319,7 @@ class Scenario:
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `python -m pytest tests/test_spec_model.py -v`
+Run: `python3 -m pytest tests/test_spec_model.py -v`
 Expected: PASS —— 5 passed
 
 - [ ] **Step 5: 提交**
@@ -449,7 +449,7 @@ def test_layout_holds_request_and_response():
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `python -m pytest tests/test_codec.py -v`
+Run: `python3 -m pytest tests/test_codec.py -v`
 Expected: FAIL —— `ModuleNotFoundError: No module named 'icsgen.codec'`
 
 - [ ] **Step 3: 写最小实现**
@@ -632,7 +632,7 @@ def decode(fields: tuple[Field, ...], data: bytes, offset: int = 0) -> dict[str,
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `python -m pytest tests/test_codec.py -v`
+Run: `python3 -m pytest tests/test_codec.py -v`
 Expected: PASS —— 11 passed
 
 - [ ] **Step 5: 提交**
@@ -788,7 +788,7 @@ def test_load_scenario_rejects_unsupported_variant(tmp_path):
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `python -m pytest tests/test_catalog.py -v`
+Run: `python3 -m pytest tests/test_catalog.py -v`
 Expected: FAIL —— `ModuleNotFoundError: No module named 'icsgen.spec.catalog'`
 
 - [ ] **Step 3: 写最小实现**
@@ -964,7 +964,7 @@ def load_scenario(path: Path, catalog: Catalog) -> Scenario:
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `python -m pytest tests/test_catalog.py -v`
+Run: `python3 -m pytest tests/test_catalog.py -v`
 Expected: PASS —— 7 passed
 
 - [ ] **Step 5: 提交**
@@ -1125,7 +1125,7 @@ def test_all_entries_declare_normal_variant():
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `python -m pytest tests/test_modbus_layouts.py -v`
+Run: `python3 -m pytest tests/test_modbus_layouts.py -v`
 Expected: FAIL —— `ModuleNotFoundError: No module named 'icsgen.protocols'`
 
 - [ ] **Step 3: 写最小实现**
@@ -1390,7 +1390,7 @@ operations:
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `python -m pytest tests/test_modbus_layouts.py -v`
+Run: `python3 -m pytest tests/test_modbus_layouts.py -v`
 Expected: PASS —— 11 passed
 
 - [ ] **Step 5: 提交**
@@ -1511,7 +1511,7 @@ def test_response_byte_count_matches_value_count():
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `python -m pytest tests/test_modbus_variants.py -v`
+Run: `python3 -m pytest tests/test_modbus_variants.py -v`
 Expected: FAIL —— `ModuleNotFoundError: No module named 'icsgen.protocols.modbus.variants'`
 
 - [ ] **Step 3: 写最小实现**
@@ -1688,7 +1688,7 @@ def plan_variant(
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `python -m pytest tests/test_modbus_variants.py -v`
+Run: `python3 -m pytest tests/test_modbus_variants.py -v`
 Expected: PASS —— 6 passed
 
 - [ ] **Step 5: 提交**
@@ -1818,7 +1818,7 @@ def test_build_exception_pdu():
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `python -m pytest tests/test_modbus_framing.py -v`
+Run: `python3 -m pytest tests/test_modbus_framing.py -v`
 Expected: FAIL —— `ModuleNotFoundError: No module named 'icsgen.protocols.modbus.crc'`
 
 - [ ] **Step 3: 写最小实现**
@@ -1926,7 +1926,7 @@ def parse_rtu(data: bytes) -> dict[str, Any]:
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `python -m pytest tests/test_modbus_framing.py -v`
+Run: `python3 -m pytest tests/test_modbus_framing.py -v`
 Expected: PASS —— 10 passed
 
 - [ ] **Step 5: 提交**
@@ -2021,7 +2021,7 @@ def test_custom_ports_are_used():
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `python -m pytest tests/test_transport_link.py -v`
+Run: `python3 -m pytest tests/test_transport_link.py -v`
 Expected: FAIL —— `ModuleNotFoundError: No module named 'icsgen.transport'`
 
 - [ ] **Step 3: 写最小实现**
@@ -2105,7 +2105,7 @@ def encapsulate(
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `python -m pytest tests/test_transport_link.py -v`
+Run: `python3 -m pytest tests/test_transport_link.py -v`
 Expected: PASS —— 6 passed
 
 - [ ] **Step 5: 提交**
@@ -2186,7 +2186,7 @@ def test_write_raw_hex_is_readable_back(tmp_path):
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `python -m pytest tests/test_pcap.py -v`
+Run: `python3 -m pytest tests/test_pcap.py -v`
 Expected: FAIL —— `ModuleNotFoundError: No module named 'icsgen.transport.pcap'`
 
 - [ ] **Step 3: 写最小实现**
@@ -2262,7 +2262,7 @@ def write_raw(directory: Path, name: str, payload: bytes) -> tuple[Path, Path]:
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `python -m pytest tests/test_pcap.py -v`
+Run: `python3 -m pytest tests/test_pcap.py -v`
 Expected: PASS —— 4 passed
 
 - [ ] **Step 5: 提交**
@@ -2422,7 +2422,7 @@ def test_builder_collects_artifacts(tmp_path):
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `python -m pytest tests/test_emit_dataset.py -v`
+Run: `python3 -m pytest tests/test_emit_dataset.py -v`
 Expected: FAIL —— `ModuleNotFoundError: No module named 'icsgen.emit.dataset'`
 
 - [ ] **Step 3: 写最小实现**
@@ -2566,7 +2566,7 @@ def write_dataset(
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `python -m pytest tests/test_emit_dataset.py -v`
+Run: `python3 -m pytest tests/test_emit_dataset.py -v`
 Expected: PASS —— 6 passed
 
 - [ ] **Step 5: 提交**
@@ -2688,7 +2688,7 @@ def test_unknown_rule_raises():
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `python -m pytest tests/test_mutate.py -v`
+Run: `python3 -m pytest tests/test_mutate.py -v`
 Expected: FAIL —— `ModuleNotFoundError: No module named 'icsgen.mutate'`
 
 - [ ] **Step 3: 写最小实现**
@@ -2907,7 +2907,7 @@ def _first_difference(original: bytes, mutated: bytes) -> int:
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `python -m pytest tests/test_mutate.py -v`
+Run: `python3 -m pytest tests/test_mutate.py -v`
 Expected: PASS —— 8 passed
 
 - [ ] **Step 5: 提交**
@@ -3066,7 +3066,7 @@ def test_build_dataset_separates_abnormal_tier(tmp_path):
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `python -m pytest tests/test_generator.py -v`
+Run: `python3 -m pytest tests/test_generator.py -v`
 Expected: FAIL —— `ModuleNotFoundError: No module named 'icsgen.protocols.base'`
 
 - [ ] **Step 3: 写最小实现**
@@ -3280,7 +3280,7 @@ def build_dataset(
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `python -m pytest tests/test_generator.py -v`
+Run: `python3 -m pytest tests/test_generator.py -v`
 Expected: PASS —— 6 passed
 
 - [ ] **Step 5: 提交**
@@ -3406,7 +3406,7 @@ def test_mutate_creates_mutated_tier(tmp_path):
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `python -m pytest tests/test_cli.py -v`
+Run: `python3 -m pytest tests/test_cli.py -v`
 Expected: FAIL —— `ModuleNotFoundError: No module named 'icsgen.cli'`
 
 - [ ] **Step 3: 写最小实现**
@@ -3594,7 +3594,7 @@ def serve(
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `python -m pytest tests/test_cli.py -v`
+Run: `python3 -m pytest tests/test_cli.py -v`
 Expected: PASS —— 7 passed
 
 - [ ] **Step 5: 提交**
@@ -3679,7 +3679,7 @@ def test_plc_server_address_is_reported():
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `python -m pytest tests/test_server.py -v`
+Run: `python3 -m pytest tests/test_server.py -v`
 Expected: FAIL —— `ModuleNotFoundError: No module named 'icsgen.server'`
 
 - [ ] **Step 3: 写最小实现**
@@ -3844,7 +3844,7 @@ def run_modbus_server(transport: str, host: str, port: int, role: str) -> None:
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `python -m pytest tests/test_server.py -v`
+Run: `python3 -m pytest tests/test_server.py -v`
 Expected: PASS —— 3 passed
 
 - [ ] **Step 5: 提交**
@@ -3948,7 +3948,7 @@ def test_operation_type_count_meets_floor():
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `python -m pytest tests/test_e2e.py -v`
+Run: `python3 -m pytest tests/test_e2e.py -v`
 Expected: FAIL —— `FileNotFoundError: scenarios/modbus_demo.yaml`
 
 - [ ] **Step 3: 写最小实现**
@@ -4074,7 +4074,7 @@ P4（Profinet / OPC UA / IEC104）推进，核心抽象不变。
 
 - [ ] **Step 4: 运行全部测试确认通过**
 
-Run: `python -m pytest tests/ -v`
+Run: `python3 -m pytest tests/ -v`
 Expected: PASS —— 全部通过
 
 - [ ] **Step 5: 提交**
