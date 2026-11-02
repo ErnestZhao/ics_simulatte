@@ -2805,8 +2805,17 @@ from icsgen.protocols.modbus.framing import (
 
 
 def test_crc16_known_vector():
-    """Modbus 规范示例：0x01 0x04 0x02 0xFF 0xFF 的 CRC 为 0xB880。"""
-    assert crc16(b"\x01\x04\x02\xff\xff") == 0xB880
+    """CRC-16/MODBUS 的标准校验值：ASCII "123456789" 的 CRC 为 0x4B37。
+
+    该值取自 CRC catalogue，与任何字节序约定无关，用来锚定算法本身。
+    """
+    assert crc16(b"123456789") == 0x4B37
+
+
+def test_crc16_rtu_vector_is_low_byte_first():
+    """0x01 0x04 0x02 0xFF 0xFF 的 CRC 值为 0x80B8，线上按低字节在前附加。"""
+    assert crc16(b"\x01\x04\x02\xff\xff") == 0x80B8
+    assert crc16(b"\x01\x04\x02\xff\xff").to_bytes(2, "little") == b"\xb8\x80"
 
 
 def test_crc16_empty_is_init_value():
@@ -2849,6 +2858,12 @@ def test_build_rtu_appends_crc_little_endian():
     assert frame[1:-2] == pdu
     expected = crc16(frame[:-2])
     assert frame[-2:] == expected.to_bytes(2, "little")
+
+
+def test_build_rtu_matches_known_wire_frame():
+    """整帧字节锚定：地址 0x01、FC04、02 FF FF 的 RTU 帧是 01 04 02 FF FF B8 80。"""
+    frame = build_rtu(unit_id=0x01, pdu=build_pdu(0x04, b"\x02\xff\xff"))
+    assert frame == b"\x01\x04\x02\xff\xff\xb8\x80"
 
 
 def test_parse_rtu_round_trip():
@@ -2987,7 +3002,7 @@ def parse_rtu(data: bytes) -> dict[str, Any]:
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python3 -m pytest tests/test_modbus_framing.py -v`
-Expected: PASS —— 10 passed
+Expected: PASS —— 12 passed
 
 - [ ] **Step 5: 提交**
 
