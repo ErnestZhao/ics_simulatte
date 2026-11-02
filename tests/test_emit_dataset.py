@@ -32,6 +32,7 @@ def test_write_dataset_writes_manifest(tmp_path):
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["dataset"] == "demo"
     assert manifest["counts"]["legit"] == 1
+    assert manifest["protocols"] == ["modbus"]
     assert manifest["artifacts"][0]["op"] == "modbus.read_holding_registers"
     assert manifest["artifacts"][0]["sha256"]
     assert manifest["artifacts"][0]["len"] == 2
