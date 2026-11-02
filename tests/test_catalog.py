@@ -1,0 +1,123 @@
+"""catalog 加载与场景校验。"""
+
+import pytest
+import yaml
+
+from icsgen.spec.catalog import Catalog, load_catalog
+from icsgen.spec.loader import ScenarioError, load_scenario
+from icsgen.spec.model import Tier, Variant
+
+
+def _write(tmp_path, name, content):
+    p = tmp_path / name
+    p.write_text(yaml.safe_dump(content, allow_unicode=True), encoding="utf-8")
+    return p
+
+
+CATALOG = {
+    "protocol": "demo",
+    "operations": [
+        {
+            "name": "demo.read_holding",
+            "summary": "读保持寄存器",
+            "layout": "fc03",
+            "variants": ["normal", "boundary"],
+            "params": {
+                "quantity": {"type": "integer", "minimum": 1, "maximum": 125, "default": 1}
+            },
+        }
+    ],
+}
+
+
+def test_load_catalog(tmp_path):
+    path = _write(tmp_path, "catalog.yaml", CATALOG)
+    catalog = load_catalog(path)
+    assert catalog.protocol == "demo"
+    assert catalog.count() == 1
+    entry = catalog.get("demo.read_holding")
+    assert entry.layout == "fc03"
+    assert entry.params["quantity"]["maximum"] == 125
+
+
+def test_catalog_unknown_operation_raises(tmp_path):
+    path = _write(tmp_path, "catalog.yaml", CATALOG)
+    catalog = load_catalog(path)
+    with pytest.raises(KeyError, match="不存在操作"):
+        catalog.get("demo.nope")
+
+
+def test_duplicate_operation_name_rejected(tmp_path):
+    bad = {
+        "protocol": "demo",
+        "operations": [CATALOG["operations"][0], CATALOG["operations"][0]],
+    }
+    path = _write(tmp_path, "catalog.yaml", bad)
+    with pytest.raises(ValueError, match="重复"):
+        load_catalog(path)
+
+
+def test_load_scenario_validates_params(tmp_path):
+    cat_path = _write(tmp_path, "catalog.yaml", CATALOG)
+    catalog = load_catalog(cat_path)
+    scn_path = _write(
+        tmp_path,
+        "scenario.yaml",
+        {
+            "name": "s1",
+            "operations": [{"op": "demo.read_holding", "params": {"quantity": 3}}],
+        },
+    )
+    scenario = load_scenario(scn_path, catalog)
+    assert scenario.name == "s1"
+    assert scenario.operations[0].params == {"quantity": 3}
+    assert scenario.operations[0].tier is Tier.LEGIT
+
+
+def test_load_scenario_rejects_unknown_op(tmp_path):
+    cat_path = _write(tmp_path, "catalog.yaml", CATALOG)
+    catalog = load_catalog(cat_path)
+    scn_path = _write(
+        tmp_path,
+        "scenario.yaml",
+        {"name": "s1", "operations": [{"op": "demo.unknown"}]},
+    )
+    with pytest.raises(ScenarioError, match="不存在操作"):
+        load_scenario(scn_path, catalog)
+
+
+def test_load_scenario_rejects_out_of_range_param(tmp_path):
+    cat_path = _write(tmp_path, "catalog.yaml", CATALOG)
+    catalog = load_catalog(cat_path)
+    scn_path = _write(
+        tmp_path,
+        "scenario.yaml",
+        {"name": "s1", "operations": [{"op": "demo.read_holding", "params": {"quantity": 500}}]},
+    )
+    with pytest.raises(ScenarioError, match="参数校验失败"):
+        load_scenario(scn_path, catalog)
+
+
+def test_load_scenario_rejects_unsupported_variant(tmp_path):
+    cat_path = _write(tmp_path, "catalog.yaml", CATALOG)
+    catalog = load_catalog(cat_path)
+    scn_path = _write(
+        tmp_path,
+        "scenario.yaml",
+        {"name": "s1", "operations": [{"op": "demo.read_holding", "variant": "exception"}]},
+    )
+    with pytest.raises(ScenarioError, match="不支持的变体"):
+        load_scenario(scn_path, catalog)
+
+
+def test_load_scenario_rejects_unknown_param(tmp_path):
+    """catalog 未声明的参数一律拒绝 —— catalog 是操作参数的唯一事实源。"""
+    cat_path = _write(tmp_path, "catalog.yaml", CATALOG)
+    catalog = load_catalog(cat_path)
+    scn_path = _write(
+        tmp_path,
+        "scenario.yaml",
+        {"name": "s1", "operations": [{"op": "demo.read_holding", "params": {"bogus": 1}}]},
+    )
+    with pytest.raises(ScenarioError, match="参数校验失败"):
+        load_scenario(scn_path, catalog)
