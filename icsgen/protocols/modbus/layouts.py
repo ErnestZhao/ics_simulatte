@@ -77,6 +77,7 @@ _FILE_READ_REQUEST_FIELDS = (
 )
 
 #: FC0x14 读文件记录响应：两个长度字段都由记录数据长度推出
+#: 记录数据以寄存器计（请求的 record_length 个寄存器），字节数是它的两倍
 _FILE_READ_RESPONSE_FIELDS = (
     Field("byte_count", "uint8", count_of="record_data", adjust=lambda n: n + 2),
     Field("file_response_length", "uint8", count_of="record_data", adjust=lambda n: n + 1),
@@ -86,6 +87,8 @@ _FILE_READ_RESPONSE_FIELDS = (
         "bytes",
         count_from="file_response_length",
         count_adjust=lambda n: n - 1,
+        len_from_request="record_length",
+        len_adjust=lambda n: n * 2,
         default=b"\x00\x01\x00\x02",
     ),
 )
