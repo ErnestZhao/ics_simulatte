@@ -86,7 +86,7 @@ def load_scenario(path: Path, catalog: Catalog) -> Scenario:
             entry = catalog.get(item.op)
         except KeyError as exc:
             raise ScenarioError(
-                f"场景 {path} 第 {index} 条操作 {item.op!r} 不存在操作"
+                f"场景 {path} 第 {index} 条操作 {item.op!r}：catalog {catalog.protocol!r} 中不存在操作"
             ) from exc
         if item.variant.value not in entry.variants:
             raise ScenarioError(
@@ -94,15 +94,21 @@ def load_scenario(path: Path, catalog: Catalog) -> Scenario:
                 f"可用变体：{entry.variants}"
             )
         _validate_params(entry, item.params, path, index)
-        operations.append(
-            Operation(
+        try:
+            operation = Operation(
                 op=item.op,
                 params=item.params,
                 variant=item.variant,
                 tier=item.tier,
                 expect_response=item.expect_response,
             )
-        )
+        except ValueError as exc:
+            # tier 与 variant 冲突由 Operation 构造时发现，这里统一转成场景错误，
+            # 保证 load_scenario 对外只有 ScenarioError 一种失败形态。
+            raise ScenarioError(
+                f"场景 {path} 第 {index} 条操作 {item.op!r} 的语义层与变体冲突：{exc}"
+            ) from exc
+        operations.append(operation)
 
     return Scenario(
         name=model.name,

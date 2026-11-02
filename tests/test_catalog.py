@@ -121,3 +121,55 @@ def test_load_scenario_rejects_unknown_param(tmp_path):
     )
     with pytest.raises(ScenarioError, match="参数校验失败"):
         load_scenario(scn_path, catalog)
+
+
+def test_load_scenario_rejects_tier_variant_conflict(tmp_path):
+    """显式 tier 与 variant 冲突时按场景错误报告，而不是逃逸裸 ValueError。"""
+    cat_path = _write(tmp_path, "catalog.yaml", CATALOG)
+    catalog = load_catalog(cat_path)
+    scn_path = _write(
+        tmp_path,
+        "scenario.yaml",
+        {
+            "name": "s1",
+            "operations": [
+                {"op": "demo.read_holding", "variant": "boundary", "tier": "abnormal"}
+            ],
+        },
+    )
+    with pytest.raises(ScenarioError, match="冲突"):
+        load_scenario(scn_path, catalog)
+
+
+def test_load_catalog_rejects_unknown_param_type(tmp_path):
+    """catalog 里的参数 schema 引用未知类型时报错，而不是逃逸第三方异常。"""
+    bad = {
+        "protocol": "demo",
+        "operations": [
+            {
+                "name": "demo.read_holding",
+                "layout": "fc03",
+                "params": {"quantity": {"type": "not-a-real-type"}},
+            }
+        ],
+    }
+    path = _write(tmp_path, "catalog.yaml", bad)
+    with pytest.raises(ValueError, match="schema 非法"):
+        load_catalog(path)
+
+
+def test_load_catalog_rejects_non_object_param_schema(tmp_path):
+    """catalog 里的参数 schema 不是对象时报错。"""
+    bad = {
+        "protocol": "demo",
+        "operations": [
+            {
+                "name": "demo.read_holding",
+                "layout": "fc03",
+                "params": {"quantity": "integer"},
+            }
+        ],
+    }
+    path = _write(tmp_path, "catalog.yaml", bad)
+    with pytest.raises(ValueError, match="必须是对象"):
+        load_catalog(path)
