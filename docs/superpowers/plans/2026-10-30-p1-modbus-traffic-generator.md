@@ -362,7 +362,7 @@ EOF
 
 - `count_of`：编码时本字段的值 = 被引用字段的元素个数，经 `adjust` 换算后写入
 - `count_from`：解码时本字段是变长数组，元素个数 = 被引用字段的值 ÷ 本字段类型宽度
-- `len_from_request`：构造响应时本数组的元素个数 = 请求中该参数的值（如 FC03 响应的寄存器数等于请求的 quantity）。仅用于构造，不影响编解码
+- `len_from_request`：构造时本数组的元素个数 = 该参数的值。响应数组的参数在请求里（如 FC03 响应的寄存器数等于请求的 quantity）；请求数组的参数在同一请求里（如 FC10 的 values 元素数等于同帧的 quantity）。仅用于构造，不影响编解码
 - `adjust`：写入长度字段前的换算函数，如 Modbus 的 `byte_count = len(values) * 2`
 
 - [ ] **Step 1: 写失败的测试**
@@ -510,7 +510,9 @@ class Field:
 
     count_of:  编码时本字段的值由被引用字段的元素个数决定（被引用字段是数组时取其长度）
     count_from: 解码时本字段是变长数组，元素个数由被引用字段的值除以本字段类型宽度得出
-    len_from_request: 构造响应时本数组的元素个数取自请求中的该参数，仅用于构造
+    len_from_request: 本数组的元素个数取自该参数的值，仅用于构造：响应数组的
+                参数在请求里（FC03 响应的寄存器数等于请求的 quantity），请求
+                数组的参数在同一请求里（FC10 的 values 元素数等于同帧的 quantity）
     adjust:    写入长度字段前的换算函数，例如 Modbus 的 byte_count = len(values) * 2
     default:   缺省值，编码时 values 中缺少该字段则使用
     """
@@ -1181,13 +1183,13 @@ EOF
 | `fc08` | 0x08 | sub_function u16, data u16 | 同请求 |
 | `fc0b` | 0x0B | 无 | status u16, event_count u16 |
 | `fc0c` | 0x0C | 无 | byte_count u8(count_of events, adjust+6), status u16, event_count u16, message_count u16, events bytes(count_from byte_count, count_adjust−6) |
-| `fc0f` | 0x0F | start_addr u16, quantity u16, byte_count u8(count_of values), values bytes(count_from byte_count) | start_addr u16, quantity u16 |
-| `fc10` | 0x10 | start_addr u16, quantity u16, byte_count u8(count_of values, adjust×2), values u16(count_from byte_count) | start_addr u16, quantity u16 |
+| `fc0f` | 0x0F | start_addr u16, quantity u16, byte_count u8(count_of values), values bytes(count_from byte_count, len_from_request quantity, len_adjust ÷8 向上取整) | start_addr u16, quantity u16 |
+| `fc10` | 0x10 | start_addr u16, quantity u16, byte_count u8(count_of values, adjust×2), values u16(count_from byte_count, len_from_request quantity) | start_addr u16, quantity u16 |
 | `fc11` | 0x11 | 无 | byte_count u8(count_of slave_id, adjust+1), slave_id bytes(count_from byte_count, count_adjust−1), run_indicator_status u8 |
 | `fc14` | 0x14 | byte_count u8, reference_type u8, file_number u16, record_number u16, record_length u16 | byte_count u8(count_of record_data, adjust+2), file_response_length u8(count_of record_data, adjust+1), reference_type u8, record_data bytes(count_from file_response_length, count_adjust−1) |
 | `fc15` | 0x15 | byte_count u8(count_of record_data, adjust+7), reference_type u8, file_number u16, record_number u16, record_length u16(count_of record_data, adjust÷2), record_data bytes(count_from record_length, count_is_elements, count_adjust×2) | 同请求 |
 | `fc16` | 0x16 | start_addr u16, and_mask u16, or_mask u16 | 同请求 |
-| `fc17` | 0x17 | read_addr u16, read_quantity u16, write_addr u16, write_quantity u16, write_byte_count u8(count_of write_values, adjust×2), write_values u16(count_from write_byte_count) | byte_count u8(count_of values, adjust×2), values u16(count_from byte_count, len_from_request read_quantity) |
+| `fc17` | 0x17 | read_addr u16, read_quantity u16, write_addr u16, write_quantity u16, write_byte_count u8(count_of write_values, adjust×2), write_values u16(count_from write_byte_count, len_from_request write_quantity) | byte_count u8(count_of values, adjust×2), values u16(count_from byte_count, len_from_request read_quantity) |
 | `fc18` | 0x18 | fifo_pointer_address u16 | byte_count u16(count_of fifo_values, adjust×2+2), fifo_count u16(count_of fifo_values), fifo_values u16(count_from fifo_count, count_is_elements) |
 | `fc2b` | 0x2B | mei_type u8, read_device_id_code u8, object_id u8 | mei_type u8, read_device_id_code u8, conformity_level u8, more_follows u8, next_object_id u8, number_of_objects u8, object_id u8, object_size u8(count_of object_value), object_value bytes(count_from object_size) |
 
@@ -1542,7 +1544,9 @@ class Field:
 
     count_of:  编码时本字段的值由被引用字段的元素个数决定（被引用字段是数组时取其长度）
     count_from: 解码时本字段是变长数组，元素个数由被引用字段的值除以本字段类型宽度得出
-    len_from_request: 构造响应时本数组的元素个数取自请求中的该参数，仅用于构造
+    len_from_request: 本数组的元素个数取自该参数的值，仅用于构造：响应数组的
+                参数在请求里（FC03 响应的寄存器数等于请求的 quantity），请求
+                数组的参数在同一请求里（FC10 的 values 元素数等于同帧的 quantity）
     len_adjust: 构造响应时元素个数的线性修正，例如 Modbus FC0x01 的响应数据按位打包，
                 字节数是线圈数向上取整除以 8
     count_is_elements: 被引用字段给出的是元素个数而非字节数时置真，解码不再除以元素宽度
@@ -1866,18 +1870,31 @@ LAYOUTS: dict[str, Layout] = {
     "fc0f": Layout(
         request=(
             Field("start_addr", "uint16"),
-            Field("quantity", "uint16"),
+            # quantity 是线圈数，位图的字节数由它推出（÷8 向上取整）
+            Field("quantity", "uint16", default=8),
             Field("byte_count", "uint8", count_of="values"),
-            Field("values", "bytes", count_from="byte_count"),
+            Field(
+                "values",
+                "bytes",
+                count_from="byte_count",
+                len_from_request="quantity",
+                len_adjust=lambda n: (n + 7) // 8,
+            ),
         ),
         response=(Field("start_addr", "uint16"), Field("quantity", "uint16")),
     ),
     "fc10": Layout(
         request=(
             Field("start_addr", "uint16"),
-            Field("quantity", "uint16"),
+            # quantity 是寄存器数，values 的元素个数与它相同
+            Field("quantity", "uint16", default=2),
             Field("byte_count", "uint8", count_of="values", adjust=lambda n: n * 2),
-            Field("values", "uint16", count_from="byte_count"),
+            Field(
+                "values",
+                "uint16",
+                count_from="byte_count",
+                len_from_request="quantity",
+            ),
         ),
         response=(Field("start_addr", "uint16"), Field("quantity", "uint16")),
     ),
@@ -1920,9 +1937,15 @@ LAYOUTS: dict[str, Layout] = {
             Field("read_addr", "uint16"),
             Field("read_quantity", "uint16"),
             Field("write_addr", "uint16"),
-            Field("write_quantity", "uint16"),
+            # write_quantity 是写入寄存器数，write_values 的元素个数与它相同
+            Field("write_quantity", "uint16", default=1),
             Field("write_byte_count", "uint8", count_of="write_values", adjust=lambda n: n * 2),
-            Field("write_values", "uint16", count_from="write_byte_count"),
+            Field(
+                "write_values",
+                "uint16",
+                count_from="write_byte_count",
+                len_from_request="write_quantity",
+            ),
         ),
         response=(
             Field("byte_count", "uint8", count_of="values", adjust=lambda n: n * 2),
@@ -2055,7 +2078,8 @@ EOF
 **Files:**
 - Create: `icsgen/protocols/modbus/variants.py`
 - Create: `tests/test_modbus_variants.py`
-- Modify: `icsgen/protocols/modbus/layouts.py`（FC0x14 响应的记录数据长度改由请求的 `record_length` 推出）
+- Modify: `icsgen/protocols/modbus/layouts.py`（FC0x14 响应的记录数据长度改由请求的 `record_length` 推出；FC0F/FC10/FC17 的请求数组声明长度来源与计数标量）
+- Modify: `icsgen/codec/fields.py`（`Field.len_from_request` 的说明覆盖「请求内计数标量」这一路径）
 
 **Interfaces:**
 - Consumes: `icsgen.codec.fields.Layout`、`icsgen.protocols.modbus.layouts.get_layout`（Task 4）、`icsgen.spec.model.Variant`（Task 1）
@@ -2069,7 +2093,7 @@ EOF
 | 变体 | 请求 | 响应 |
 |---|---|---|
 | `normal` | 按 catalog 参数默认值填充 | 按布局生成合理的默认值 |
-| `boundary` | 标量参数取上界（`maxima`）；数组参数取最大元素个数（`max_counts`）并把每个元素顶到元素上界（`maxima`） | 同 normal |
+| `boundary` | 标量参数取上界（`maxima`）；数组参数取其应有的长度并把每个元素顶到元素上界（`maxima`） | 同 normal |
 | `exception` | 请求同 normal | 异常响应：功能码 \| 0x80 + 异常码（默认 0x02 非法数据地址） |
 | `illegal_fc` | 功能码就是 catalog 条目声明的非法功能码 | 异常响应：功能码 \| 0x80 + 异常码 0x01 非法功能码 |
 | `malformed` | 请求同 normal，但长度字段与实际内容不符 | 无响应 |
@@ -2082,6 +2106,13 @@ EOF
 > FC10 写多个寄存器若 `quantity` 顶到 123 而 `values` 只有 2 个元素，从站会直接判为协议错误，
 > 而这份流量挂在 `legit` 语义层下。故 `maxima` 传元素值上界，`max_counts` 传元素个数上界，
 > 两者都来自 catalog，由适配器（Task 11）读出后传入。
+
+> **数组长度由计数标量决定**：请求里的数组长度不由参数给，而由同帧的计数标量决定 ——
+> FC10 的 `values` 元素数 = `quantity`，FC0F 的 `values` 字节数 = ⌈`quantity` ÷ 8⌉，
+> FC17 的 `write_values` 元素数 = `write_quantity`。计数标量是权威的一方：数组内容
+> 不足时补零、超出时截断。这样场景改写 `quantity` 时帧里的计数标量与实际内容不会脱节。
+> 布局上用 `Field.len_from_request` 声明这层关系；边界变体里计数标量被顶到上界，
+> 数组长度随之变化。
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -2203,17 +2234,67 @@ def test_file_write_response_length_fields_are_consistent():
     assert len(plan.response_values["record_data"]) == 4
 
 
-def test_circular_array_placeholder_is_a_sequence():
-    """数组的长度来源是长度字段（环状引用）时，占位值必须是序列而不是标量。
+def test_circular_array_is_never_a_scalar():
+    """数组的取值必须是序列而不是标量。
 
     FC17 的 write_values 长度由 write_byte_count 推出，而 write_byte_count 又由
-    write_values 推出 —— 没有参数时无法反推，只能给一个最小长度的占位数组。
-    给标量会让编码器在遍历数组时抛裸 TypeError。
+    write_values 推出 —— 环状引用下无法从长度字段反推数组，只能由计数标量
+    write_quantity 推出。给标量会让编码器在遍历数组时抛裸 TypeError。
     """
     layout = get_layout("fc17")
     plan = plan_variant(layout, "modbus.read_write_multiple_registers", 23, {}, Variant.NORMAL)
     assert plan.request_values["write_values"] == [0]
-    assert encode(layout.request, plan.request_values) == b"\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00"
+    assert encode(layout.request, plan.request_values) == b"\x00\x00\x00\x00\x00\x00\x00\x01\x02\x00\x00"
+
+
+def test_response_array_without_length_source_is_a_sequence():
+    """长度来源不可得的响应数组退回占位值，占位值同样是序列。"""
+    layout = get_layout("fc0c")
+    plan = plan_variant(layout, "modbus.get_comm_event_log", 12, {}, Variant.NORMAL)
+    assert plan.response_values["events"] == b"\x00"
+    assert plan.response_values["byte_count"] == 7
+
+
+def test_request_array_follows_quantity():
+    """FC10 的寄存器数组长度跟随 quantity：计数标量与实际内容必须一致。"""
+    layout = get_layout("fc10")
+    plan = plan_variant(
+        layout,
+        "modbus.write_multiple_registers",
+        16,
+        {"quantity": 5, "values": [1, 1]},
+        Variant.NORMAL,
+    )
+    assert plan.request_values["values"] == [1, 1, 0, 0, 0]
+    assert plan.request_values["byte_count"] == 10
+
+
+def test_bit_write_request_array_follows_quantity():
+    """FC0F 的线圈位图字节数是线圈数除以 8 向上取整。"""
+    layout = get_layout("fc0f")
+    plan = plan_variant(
+        layout,
+        "modbus.write_multiple_coils",
+        15,
+        {"quantity": 16, "values": b"\xff"},
+        Variant.NORMAL,
+    )
+    assert plan.request_values["values"] == b"\xff\x00"
+    assert plan.request_values["byte_count"] == 2
+
+
+def test_fc17_write_values_follows_write_quantity():
+    """FC17 的写入数组长度跟随 write_quantity。"""
+    layout = get_layout("fc17")
+    plan = plan_variant(
+        layout,
+        "modbus.read_write_multiple_registers",
+        23,
+        {"write_quantity": 3, "write_values": [1]},
+        Variant.NORMAL,
+    )
+    assert plan.request_values["write_values"] == [1, 0, 0]
+    assert plan.request_values["write_byte_count"] == 6
 
 
 def test_boundary_grows_array_to_max_count():
@@ -2288,9 +2369,14 @@ Expected: FAIL —— `ModuleNotFoundError: No module named 'icsgen.protocols.mo
 参数上界，exception 产生协议异常响应，illegal_fc 使用非法功能码，
 malformed 构造长度字段与实际内容不符的畸形帧。
 
+帧里的计数标量必须与实际内容自洽：请求内数组的长度由计数标量决定
+（FC10 的 quantity、FC0F 的 quantity、FC17 的 write_quantity），长度字段
+再由数组长度推出。
+
 边界变体需要两个上界：``maxima`` 是标量参数的上界与数组元素的上界，
-``max_counts`` 是数组参数的元素个数上界。两者都来自 catalog，缺一不可 ——
-只顶元素值会让帧里的计数标量与实际内容自相矛盾。
+``max_counts`` 是数组参数的元素个数上界（用于没有计数标量的数组，如
+FC15 的记录数据）。两者都来自 catalog，缺一不可 —— 只顶元素值会让帧里
+的计数标量与实际内容自相矛盾。
 """
 
 from __future__ import annotations
@@ -2338,6 +2424,66 @@ def _array_placeholder(f: Field) -> Any:
     return [0]
 
 
+def _fit_array(current: Any, count: int, ftype: str) -> Any:
+    """把数组调整到 count 个元素：不足补零，超出截断。
+
+    结果形态跟随字段类型：bytes 型字段给出字节串，其余给出列表。
+    """
+    if count < 0:
+        count = 0
+    if ftype == "bytes":
+        if isinstance(current, (bytes, bytearray)):
+            data = bytes(current)
+        elif isinstance(current, (list, tuple)):
+            data = bytes(int(item) & 0xFF for item in current)
+        else:
+            data = b""
+        if len(data) >= count:
+            return data[:count]
+        return data + b"\x00" * (count - len(data))
+    items = list(current) if isinstance(current, (list, tuple)) else []
+    if len(items) >= count:
+        return items[:count]
+    return items + [0] * (count - len(items))
+
+
+def _align_arrays(layout: Layout, values: dict[str, Any]) -> None:
+    """让请求里的数组长度跟随计数标量，就地更新取值字典。
+
+    计数标量（FC10 的 quantity、FC0F 的 quantity、FC17 的 write_quantity）
+    决定数组该有多长；数组长度必须与它一致，否则帧里的计数标量与实际内容
+    自相矛盾。内容不足时补零、超出时截断。
+    """
+    for f in layout.request:
+        if f.len_from_request is None:
+            continue
+        raw = values.get(f.len_from_request)
+        if raw is None:
+            continue
+        count = _element_count(f, int(raw), from_request=True)
+        values[f.name] = _fit_array(values.get(f.name), count, f.type)
+
+
+def _array_length(
+    f: Field | None,
+    values: dict[str, Any],
+    max_counts: dict[str, int],
+    name: str,
+) -> int:
+    """数组在边界变体下该有的长度。
+
+    有计数标量时以计数标量为准（帧里的计数必须与内容一致）；没有计数标量
+    的数组（如 FC15 的记录数据）取最大元素个数 ``max_counts``。
+    """
+    if f is not None and f.len_from_request is not None:
+        raw = values.get(f.len_from_request)
+        if raw is not None:
+            return _element_count(f, int(raw), from_request=True)
+    current = values.get(name)
+    length = len(current) if isinstance(current, (list, tuple, bytes, bytearray)) else 0
+    return max_counts.get(name, length)
+
+
 def _element_count(f: Field, raw: int, from_request: bool = False) -> int:
     """把长度来源换算成元素个数。
 
@@ -2376,10 +2522,11 @@ def _apply_length_fields(fields: tuple[Field, ...], values: dict[str, Any]) -> N
 def _build_values(layout: Layout, params: dict[str, Any]) -> dict[str, Any]:
     """按布局与参数填充取值字典。
 
-    三遍处理：先填普通字段，再定出变长数组，最后由数组长度算出长度字段。
-    参数优先，其次是字段声明的缺省值，最后才是占位值；变长数组若既没有
-    参数也没有缺省值，按其长度来源补一份零填充数据。长度字段与数组内容
-    必须自洽，否则编码出来的帧与声明的规模对不上。
+    四遍处理：先填普通字段，再定出变长数组，然后让数组长度跟随计数标量，
+    最后由数组长度算出长度字段。参数优先，其次是字段声明的缺省值，最后
+    才是占位值；变长数组若既没有参数也没有缺省值，按其长度来源补一份零
+    填充数据。长度字段与数组内容必须自洽，否则编码出来的帧与声明的规模
+    对不上。
     """
     values: dict[str, Any] = {}
 
@@ -2405,16 +2552,24 @@ def _build_values(layout: Layout, params: dict[str, Any]) -> dict[str, Any]:
         if f.default is not None:
             values[f.name] = f.default
             continue
-        source = by_name.get(f.count_from)
-        raw = values.get(f.count_from) if source is not None else None
-        if source is None or source.count_of is not None or raw is None:
+        # 长度来源：优先用请求内的计数标量，否则用长度字段
+        source_name = f.len_from_request or f.count_from
+        source = by_name.get(source_name)
+        raw = values.get(source_name) if source is not None else None
+        if source is None or raw is None:
+            values[f.name] = _array_placeholder(f)
+            continue
+        if f.len_from_request is None and source.count_of is not None:
             # 长度字段本身由数组长度推出，无法反推数组
             values[f.name] = _array_placeholder(f)
             continue
-        count = _element_count(f, raw)
+        count = _element_count(f, raw, from_request=f.len_from_request is not None)
         values[f.name] = b"\x00" * count if f.type == "bytes" else [0] * count
 
-    # 第三遍：长度字段
+    # 第三遍：数组长度跟随计数标量
+    _align_arrays(layout, values)
+
+    # 第四遍：长度字段
     _apply_length_fields(layout.request, values)
     return values
 
@@ -2427,21 +2582,35 @@ def _apply_boundary(
 ) -> dict[str, Any]:
     """把参数顶到上界。
 
-    标量参数取其最大值；数组参数取最大元素个数（``max_counts``），并把每个
-    元素顶到元素上界（``maxima``）。数组长度必须一起顶 —— 只顶元素值会让帧
-    里的计数标量与实际内容对不上。
+    标量参数取其最大值；数组参数取其应有的长度（有计数标量的以计数标量
+    为准，没有的取最大元素个数 ``max_counts``），并把每个元素顶到元素上界
+    （``maxima``）。数组长度与元素值必须一起顶 —— 只顶元素值会让帧里的
+    计数标量与实际内容对不上。
     """
     values = _build_values(layout, params)
+    by_name = {f.name: f for f in layout.request}
+
+    # 标量参数顶到上界
     for name, maximum in maxima.items():
         current = values.get(name)
         if isinstance(current, bool):
             continue
         if isinstance(current, int):
             values[name] = maximum
-        elif isinstance(current, (list, tuple)):
-            values[name] = [maximum] * max_counts.get(name, len(current))
+
+    # 数组参数：长度取应有的长度，元素值顶到元素上界
+    for name, maximum in maxima.items():
+        current = values.get(name)
+        if isinstance(current, (list, tuple)):
+            count = _array_length(by_name.get(name), values, max_counts, name)
+            values[name] = [maximum] * count
         elif isinstance(current, (bytes, bytearray)):
-            values[name] = bytes([maximum & 0xFF]) * max_counts.get(name, len(current))
+            count = _array_length(by_name.get(name), values, max_counts, name)
+            values[name] = bytes([maximum & 0xFF]) * count
+
+    # 没有元素上界的数组也要跟随计数标量
+    _align_arrays(layout, values)
+
     _apply_length_fields(layout.request, values)
     return values
 
@@ -2548,7 +2717,7 @@ def plan_variant(
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python3 -m pytest tests/test_modbus_variants.py -v`
-Expected: PASS —— 15 passed
+Expected: PASS —— 19 passed
 
 - [ ] **Step 5: 提交**
 
@@ -4872,10 +5041,10 @@ operations:
   - op: modbus.read_holding_registers
     params: {start_addr: 0, quantity: 3}
     variant: exception
-  # 异常：非法功能码
+  # 异常：非法功能码（功能码取 catalog 条目声明的保留值 99）
   - op: modbus.illegal_function_code
-    params: {raw_function_code: 43, quantity: 1}
-    variant: normal
+    params: {quantity: 1}
+    variant: illegal_fc
 ```
 
 创建 `README.md`：
