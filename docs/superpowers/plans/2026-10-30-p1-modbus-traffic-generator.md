@@ -1147,14 +1147,17 @@ EOF
 - Create: `icsgen/protocols/modbus/layouts.py`
 - Create: `icsgen/protocols/modbus/catalog.yaml`
 - Create: `tests/test_modbus_layouts.py`
+- Modify: `icsgen/spec/catalog.py`
 
 **Interfaces:**
 - Consumes: `icsgen.codec.fields.Field`、`icsgen.codec.fields.Layout`（Task 2）、`icsgen.spec.catalog.load_catalog`（Task 3）
 - Produces:
   - `icsgen.protocols.modbus.layouts.LAYOUTS: dict[str, Layout]` —— 布局名 → 布局
   - `icsgen.protocols.modbus.layouts.get_layout(name: str) -> Layout`（不存在时抛 `KeyError`）
-  - `icsgen.protocols.modbus.layouts.DIAGNOSTIC_SUBFUNCTIONS: dict[int, str]` —— 诊断子功能码 → 名称，共 20 项
-  - `icsgen.protocols.modbus.catalog.yaml` —— 41 个操作类型，协议名 `modbus`
+  - `icsgen.protocols.modbus.layouts.DIAGNOSTIC_SUBFUNCTIONS: dict[int, str]` —— 诊断子功能码 → 名称，共 21 项
+  - `icsgen.protocols.modbus.catalog.yaml` —— 41 个操作类型，协议名 `modbus`，顶层声明传输 `tcp` 与 `rtu`
+  - `icsgen.spec.catalog.Catalog.transports: tuple[str, ...]` —— catalog 声明的传输方式，缺省 `("tcp",)`
+  - `icsgen.spec.catalog.Catalog.coverage_count() -> int` —— 覆盖条目数 = Σ(每个操作类型的变体数) × 传输数
 
 **布局清单**（请求/响应均不含功能码字节，功能码由适配器单独拼装）：
 
@@ -1246,16 +1249,23 @@ def test_fc08_carries_sub_function():
     assert raw == b"\x00\x04\x00\x00"
 
 
-def test_diagnostic_subfunction_table_has_twenty_entries():
-    assert len(DIAGNOSTIC_SUBFUNCTIONS) == 20
+def test_diagnostic_subfunction_table_has_twenty_one_entries():
+    assert len(DIAGNOSTIC_SUBFUNCTIONS) == 21
     assert DIAGNOSTIC_SUBFUNCTIONS[0x0004] == "Force Listen Only Mode"
     assert DIAGNOSTIC_SUBFUNCTIONS[0x0015] == "Get Clear Modbus Plus Request"
 
 
-def test_catalog_has_at_least_ninety_entries():
+def test_catalog_declares_operation_types_and_transports():
     catalog = load_catalog(CATALOG_PATH)
     assert catalog.protocol == "modbus"
-    assert catalog.count() >= 90, f"操作类型数量 {catalog.count()} 低于下限 90"
+    assert catalog.count() == 41
+    assert catalog.transports == ("tcp", "rtu")
+
+
+def test_catalog_coverage_count_meets_floor():
+    """覆盖条目数 = Σ(每个操作类型的变体数) × 传输数，是 §15 丰富度指标的度量口径。"""
+    catalog = load_catalog(CATALOG_PATH)
+    assert catalog.coverage_count() >= 90, f"覆盖条目数 {catalog.coverage_count()} 低于下限 90"
 
 
 def test_every_catalog_entry_references_existing_layout():
@@ -1266,10 +1276,10 @@ def test_every_catalog_entry_references_existing_layout():
 
 
 def test_diagnostic_operations_cover_all_subfunctions():
-    """20 个诊断子功能各自是一个操作类型。"""
+    """21 个诊断子功能各自是一个操作类型。"""
     catalog = load_catalog(CATALOG_PATH)
     diag = [n for n in catalog.operations if n.startswith("modbus.diagnostics.")]
-    assert len(diag) == 20
+    assert len(diag) == 21
 
 
 def test_all_entries_declare_normal_variant():
@@ -1287,13 +1297,75 @@ Expected: FAIL —— `ModuleNotFoundError: No module named 'icsgen.protocols'`
 
 创建 `icsgen/protocols/__init__.py` 与 `icsgen/protocols/modbus/__init__.py`（空文件）。
 
+修改 `icsgen/spec/catalog.py`（Task 3 的文件，本任务为其补上传输维度与覆盖度口径）：
+
+```python
+# (1) CatalogModel 增加 transports 字段
+class CatalogModel(BaseModel):
+    """catalog.yaml 的结构。"""
+
+    protocol: str
+    transports: list[str] = Field(default_factory=lambda: ["tcp"])
+    operations: list[OperationEntry]
+
+
+# (2) Catalog 增加 transports 字段与 coverage_count() 方法
+@dataclass(frozen=True)
+class Catalog:
+    """已加载的操作目录。"""
+
+    protocol: str
+    operations: dict[str, OperationEntry]
+    transports: tuple[str, ...] = ("tcp",)
+
+    def get(self, name: str) -> OperationEntry:
+        """按操作名取条目，不存在时抛 KeyError。"""
+        try:
+            return self.operations[name]
+        except KeyError as exc:
+            raise KeyError(f"catalog {self.protocol!r} 中不存在操作 {name!r}") from exc
+
+    def count(self) -> int:
+        """操作类型数量。"""
+        return len(self.operations)
+
+    def coverage_count(self) -> int:
+        """覆盖条目数 = Σ(每个操作类型的变体数) × 传输数。
+
+        这是 §15 丰富度指标的度量口径：一条覆盖条目对应一个
+        (操作类型, 变体, 传输) 组合，即一条可生成的流量样本。
+        """
+        variants = sum(len(entry.variants) for entry in self.operations.values())
+        return variants * len(self.transports)
+
+
+# (3) load_catalog 把 transports 传给 Catalog
+def load_catalog(path: Path) -> Catalog:
+    """从 YAML 文件加载 catalog。"""
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    model = CatalogModel.model_validate(raw)
+    for entry in model.operations:
+        _check_params_schema(entry, path)
+    operations = {entry.name: entry for entry in model.operations}
+    if len(operations) != len(model.operations):
+        raise ValueError(f"catalog {path} 中存在重复的操作名")
+    return Catalog(
+        protocol=model.protocol,
+        operations=operations,
+        transports=tuple(model.transports),
+    )
+```
+
+`Catalog` 是 frozen dataclass，新增的 `transports` 字段带默认值，放在 `operations` 之后，
+不会破坏已有的位置参数调用。`Field` 已在该文件的 pydantic 导入中，无需新增导入。
+
 创建 `icsgen/protocols/modbus/layouts.py`：
 
 ```python
 """Modbus 功能码的字段布局。
 
 布局描述请求与响应 PDU 的字节结构（不含功能码字节本身，功能码由适配器
-单独拼装）。诊断子功能的 20 个变体共享 fc08 布局，仅子功能码默认值不同。
+单独拼装）。诊断子功能的 21 个变体共享 fc08 布局，仅子功能码默认值不同。
 """
 
 from __future__ import annotations
@@ -1492,6 +1564,7 @@ def get_layout(name: str) -> Layout:
 
 ```yaml
 protocol: modbus
+transports: [tcp, rtu]
 operations:
   # ---- 读取类功能码 ----
   - {name: modbus.read_coils, summary: 读线圈状态 (FC01), layout: fc01, func_code: 1, tier: legit, variants: [normal, boundary, exception], params: {start_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, quantity: {type: integer, minimum: 1, maximum: 2000, default: 1}}}
@@ -1517,7 +1590,7 @@ operations:
   - {name: modbus.read_write_multiple_registers, summary: 读写多个保持寄存器 (FC17), layout: fc17, func_code: 23, tier: legit, variants: [normal, exception], params: {read_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, read_quantity: {type: integer, minimum: 1, maximum: 125, default: 1}, write_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, write_quantity: {type: integer, minimum: 1, maximum: 121, default: 1}}}
   # ---- 设备标识 ----
   - {name: modbus.read_device_identification, summary: 读设备标识 MEI (FC2B), layout: fc2b, func_code: 43, tier: legit, variants: [normal, exception], params: {read_device_id_code: {type: integer, minimum: 0, maximum: 255, default: 1}, object_id: {type: integer, minimum: 0, maximum: 255, default: 0}}}
-  # ---- 诊断子功能：20 个独立操作类型，共享 fc08 布局 ----
+  # ---- 诊断子功能：21 个独立操作类型，共享 fc08 布局 ----
   - {name: modbus.diagnostics.return_query_data, summary: 诊断-返回查询数据 (FC08/00), layout: fc08, func_code: 8, tier: legit, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 0}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
   - {name: modbus.diagnostics.restart_communications_option, summary: 诊断-重启通信选项 (FC08/01), layout: fc08, func_code: 8, tier: legit, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 1}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
   - {name: modbus.diagnostics.return_diagnostic_register, summary: 诊断-返回诊断寄存器 (FC08/02), layout: fc08, func_code: 8, tier: legit, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 2}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
@@ -1546,18 +1619,20 @@ operations:
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python3 -m pytest tests/test_modbus_layouts.py -v`
-Expected: PASS —— 11 passed
+Expected: PASS —— 12 passed
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add icsgen/protocols/ tests/test_modbus_layouts.py
+git add icsgen/protocols/ icsgen/spec/catalog.py tests/test_modbus_layouts.py
 git commit -m "$(cat <<'EOF'
 feat: Modbus 字段布局与 41 个操作类型的操作目录
 
-layouts.py 声明各功能码的请求/响应字节结构，诊断 20 个子功能共享
+layouts.py 声明各功能码的请求/响应字节结构，诊断 21 个子功能共享
 fc08 布局。catalog.yaml 声明 41 个操作类型及其参数 schema，
-覆盖规范 19 个功能码 + MEI 0x2B + 20 个诊断子功能 + 非法功能码。
+覆盖规范 19 个功能码 + MEI 0x2B + 21 个诊断子功能 + 非法功能码，
+并声明 tcp 与 rtu 两种传输。catalog 侧补上 coverage_count()，
+作为 §15 丰富度指标的统一度量口径。
 
 Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
 EOF
@@ -3494,6 +3569,7 @@ runner = CliRunner()
 
 
 def test_catalog_count_reports_number():
+    """--count 输出覆盖条目数，是 §15 丰富度指标的 CI 口径。"""
     result = runner.invoke(app, ["catalog", "--protocol", "modbus", "--count"])
     assert result.exit_code == 0, result.output
     count = int(result.stdout.strip())
@@ -3723,14 +3799,17 @@ def mutate_cmd(
 @app.command("catalog")
 def catalog_cmd(
     protocol: str = typer.Option("modbus", "--protocol", help="协议名"),
-    count: bool = typer.Option(False, "--count", help="只输出操作类型数量"),
+    count: bool = typer.Option(False, "--count", help="只输出覆盖条目数"),
 ) -> None:
     """查看操作目录统计。"""
     catalog = _catalog_for(protocol)
     if count:
-        typer.echo(str(catalog.count()))
+        typer.echo(str(catalog.coverage_count()))
         return
-    typer.echo(f"协议 {catalog.protocol}，操作类型 {catalog.count()} 个")
+    typer.echo(
+        f"协议 {catalog.protocol}，操作类型 {catalog.count()} 个，"
+        f"传输 {'/'.join(catalog.transports)}，覆盖条目 {catalog.coverage_count()} 个"
+    )
 
 
 @app.command("serve")
@@ -4096,9 +4175,9 @@ def test_generated_pcap_is_parseable(tmp_path):
 
 
 def test_operation_type_count_meets_floor():
-    """操作类型数量不得低于下限（CI 防退化）。"""
+    """覆盖条目数不得低于下限（CI 防退化）。"""
     catalog = load_catalog(CATALOG_PATH)
-    assert catalog.count() >= 90, f"操作类型数量 {catalog.count()} 低于下限 90"
+    assert catalog.coverage_count() >= 90, f"覆盖条目数 {catalog.coverage_count()} 低于下限 90"
 ```
 
 - [ ] **Step 2: 运行测试确认失败**

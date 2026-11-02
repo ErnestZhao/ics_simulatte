@@ -97,7 +97,7 @@ Scapy 另提供 `ModbusPDUReservedFunctionCode*` 与 `ModbusPDUUserDefinedFuncti
 Scapy 的 Modbus PDU 是**固定的 Packet 类**（每功能码一个类，字段写死在 `fields_desc` 中）。这带来两个后果：
 
 1. 缺失的 4 个功能码、4 个诊断子功能**无法**通过 Scapy 表达
-2. **catalog 无法驱动编码** —— 每个操作类型的参数布局都硬编码在 Scapy 类里，catalog 只能声明元数据。诊断子功能的 20 种布局、Modbus 各功能码的参数差异，都得写成 Python 代码而非 YAML 声明
+2. **catalog 无法驱动编码** —— 每个操作类型的参数布局都硬编码在 Scapy 类里，catalog 只能声明元数据。诊断子功能的 21 个子功能、Modbus 各功能码的参数差异，都得写成 Python 代码而非 YAML 声明
 
 这与 §8「catalog 是操作类型的唯一事实源」直接冲突。若坚持 Scapy 基座，37 个操作类型就意味着 37 个硬编码构建函数，catalog 沦为文档。
 
@@ -314,7 +314,7 @@ class ProtocolAdapter(Protocol):
 
 ### 8.1 格式
 
-catalog 位于 `icsgen/protocols/<proto>/catalog.yaml`，声明**操作元数据与参数 schema**；**字段布局**位于同目录的 `layouts.py`，由 catalog 通过 `layout:` 字段名引用。布局放 Python 而非 YAML 的原因：诊断功能码的 20 个子功能共享同一字段布局、仅 `sub_function` 默认值不同，用 Python 可程序化批量生成，避免 YAML 里重复 20 遍。
+catalog 位于 `icsgen/protocols/<proto>/catalog.yaml`，声明**操作元数据与参数 schema**；**字段布局**位于同目录的 `layouts.py`，由 catalog 通过 `layout:` 字段名引用。布局放 Python 而非 YAML 的原因：诊断功能码的 21 个子功能共享同一字段布局、仅 `sub_function` 默认值不同，用 Python 可程序化批量生成，避免 YAML 里重复 21 遍。
 
 ```yaml
 protocol: modbus
@@ -364,11 +364,13 @@ LAYOUTS = {
 |---|---|---|
 | 规范功能码 | FC 0x01–0x08, 0x0B, 0x0C, 0x0F, 0x10, 0x11, 0x12, 0x14–0x18 | 19 |
 | MEI | FC 0x2B 子类型 0x0E Read Device Identification | 1 |
-| 诊断子功能 | FC 0x08 的 20 个子功能各自独立成一个操作类型 | 20 |
+| 诊断子功能 | FC 0x08 的 21 个子功能各自独立成一个操作类型 | 21 |
 | 协议级异常 | `modbus.illegal_function_code`（可指定 `raw_function_code`） | 1 |
 | **操作类型合计** | | **41** |
 
-**条目计数模型**：一条 catalog 条目 = 一个 (操作类型, 变体, 传输) 组合。
+**条目计数模型**：一条覆盖条目 = 一个 (操作类型, 变体, 传输) 组合。catalog 中每个操作类型声明自己的变体集合，catalog 顶层声明适用的传输集合，因此
+
+**覆盖条目数 = Σ(每个操作类型的变体数) × 传输数**
 
 | 变体 | 说明 | 适用性 |
 |---|---|---|
@@ -376,15 +378,15 @@ LAYOUTS = {
 | `exception` | 协议异常响应（FC \| 0x80 + 异常码） | 全部操作类型 |
 | `boundary` | 参数取边界/越界值 | 仅参数型操作类型 |
 
-计数（保守估计，仅 normal + exception）：
+计数（41 个操作类型共 87 个 (操作类型, 变体) 组合，传输 TCP 与 RTU 各一份）：
 
 | 传输 | 条目数 |
 |---|---|
-| TCP | 41 × 2 = 82 |
-| RTU | 82 |
-| **合计** | **164** |
+| TCP | 87 × 1 = 87 |
+| RTU | 87 |
+| **合计** | **174** |
 
-164 ≥ 90，满足 §15 指标且留有余量（boundary 变体与 MEI/诊断子功能的细分只会增加，不会减少）。若个别操作类型的变体在实现中不适用（如 FC0x07 Read Exception Status 无参数，boundary 无意义），从 catalog 移除该变体并相应下调，**但总数不得低于 90**。
+174 ≥ 90，满足 §15 指标且留有余量。**覆盖条目数**是 §15 指标的唯一度量口径，由 `Catalog.coverage_count()` 计算（`Σ(len(entry.variants)) × len(transports)`），CI 断言与 `icsgen catalog --count` 共用这一口径。若个别操作类型的变体在实现中不适用（如 FC0x07 Read Exception Status 无参数，boundary 无意义），从 catalog 移除该变体并相应下调，**但总数不得低于 90**。
 
 ### 8.3 语义变体
 
@@ -562,7 +564,7 @@ icsgen validate   <scenario.yaml>
 icsgen generate   <scenario.yaml> -o datasets/demo [--formats pcap,bin,hex] [--tier legit,abnormal]
 icsgen mutate     datasets/demo -o datasets/fuzz --rules all --seed 42
 icsgen serve      --protocol modbus --transport tcp --port 5020 --role client
-icsgen catalog    --protocol modbus --count        # 统计操作条目数（CI 防退化用）
+icsgen catalog    --protocol modbus --count        # 统计覆盖条目数（CI 防退化用）
 ```
 
 - `icsgen` 同时是可 `import` 的库（`import icsgen`），CLI 只是薄封装
@@ -574,7 +576,7 @@ icsgen catalog    --protocol modbus --count        # 统计操作条目数（CI 
 
 | 阶段 | 协议 | 操作条目数下限 | 检查命令 |
 |---|---|---|---|
-| P1 | Modbus TCP + RTU | ≥ 90 | `icsgen catalog --protocol modbus --count` |
+| P1 | Modbus TCP + RTU | 覆盖条目数 ≥ 90 | `icsgen catalog --protocol modbus --count` |
 | P2 | EtherNet/IP + CIP | ≥ 110 | 同上 |
 | P3 | S7comm | ≥ 60 | 同上 |
 | P4 | Profinet / OPC UA / IEC104 | ≥ 140 | 同上 |
