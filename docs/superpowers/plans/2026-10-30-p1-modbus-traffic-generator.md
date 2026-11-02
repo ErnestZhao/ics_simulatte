@@ -703,7 +703,7 @@ EOF
 **Interfaces:**
 - Consumes: `icsgen.spec.model.Operation`、`icsgen.spec.model.Scenario`、`icsgen.spec.model.Tier`、`icsgen.spec.model.Variant`（Task 1）
 - Produces:
-  - `icsgen.spec.catalog.OperationEntry(pydantic.BaseModel)`：字段 `name: str`、`summary: str = ""`、`layout: str`、`tier: str = "legit"`、`variants: list[str] = ["normal"]`、`params: dict[str, Any] = {}`、`func_code: int | None = None`
+  - `icsgen.spec.catalog.OperationEntry(pydantic.BaseModel)`：字段 `name: str`、`summary: str = ""`、`layout: str`、`tier: str = "legit"`、`variants: list[str] = ["normal"]`、`params: dict[str, Any] = {}`、`func_code: int | None = None`（**Task 4 移除 `tier` 字段**，语义层改由变体推导，见 Task 4 的「为什么移除 `OperationEntry.tier`」）
   - `icsgen.spec.catalog.Catalog`：`frozen dataclass`，字段 `protocol: str`、`operations: dict[str, OperationEntry]`；方法 `get(name) -> OperationEntry`（不存在时抛 `KeyError`）、`count() -> int`
   - `icsgen.spec.catalog.load_catalog(path: Path) -> Catalog`
   - `icsgen.spec.loader.ScenarioError(ValueError)`
@@ -1147,39 +1147,63 @@ EOF
 - Create: `icsgen/protocols/modbus/layouts.py`
 - Create: `icsgen/protocols/modbus/catalog.yaml`
 - Create: `tests/test_modbus_layouts.py`
-- Modify: `icsgen/spec/catalog.py`
+- Modify: `icsgen/codec/fields.py`（新增 `count_is_elements` 与 `count_adjust` 两个长度换算开关）
+- Modify: `icsgen/codec/decoder.py`（按新开关解释 `count_from` 的元素个数）
+- Modify: `icsgen/codec/encoder.py`（`count_of` / `count_from` 缺值时回退到字段缺省值）
+- Modify: `icsgen/spec/catalog.py`（移除 `OperationEntry.tier`，catalog 模型拒绝未知键）
+- Modify: `tests/test_codec.py`（新增 4 个用例）
 
 **Interfaces:**
 - Consumes: `icsgen.codec.fields.Field`、`icsgen.codec.fields.Layout`（Task 2）、`icsgen.spec.catalog.load_catalog`（Task 3）
 - Produces:
-  - `icsgen.protocols.modbus.layouts.LAYOUTS: dict[str, Layout]` —— 布局名 → 布局
+  - `icsgen.codec.fields.Field.count_is_elements: bool = False` —— 被引用字段给出的是**元素个数**而非字节数时置真，解码不再除以元素宽度
+  - `icsgen.codec.fields.Field.count_adjust: Callable[[int], int] | None = None` —— 元素个数换算后的线性修正
+  - `icsgen.protocols.modbus.layouts.LAYOUTS: dict[str, Layout]` —— 布局名 → 布局，共 19 个
   - `icsgen.protocols.modbus.layouts.get_layout(name: str) -> Layout`（不存在时抛 `KeyError`）
   - `icsgen.protocols.modbus.layouts.DIAGNOSTIC_SUBFUNCTIONS: dict[int, str]` —— 诊断子功能码 → 名称，共 21 项
   - `icsgen.protocols.modbus.catalog.yaml` —— 41 个操作类型，协议名 `modbus`，顶层声明传输 `tcp` 与 `rtu`
   - `icsgen.spec.catalog.Catalog.transports: tuple[str, ...]` —— catalog 声明的传输方式，缺省 `("tcp",)`
   - `icsgen.spec.catalog.Catalog.coverage_count() -> int` —— 覆盖条目数 = Σ(每个操作类型的变体数) × 传输数
 
+**为什么需要两个新的长度换算开关**：Modbus 的长度字段有两种形态 —— **字节计数**（`byte_count`，值 = 数据字节数）与**元素计数**（FC0x18 的 `fifo_count`、FC0x0C 的 `event_log_count`，值 = 元素个数）。原内核只有「元素个数 = 引用值 ÷ 元素宽度」一条规则，遇到元素计数字段会把个数算少一半。`count_is_elements` 声明引用值本身就是元素个数；`count_adjust` 在换算后对个数做一次修正（如 FC0x15 的 `record_length` 是寄存器数，字节数是它的两倍）。
+
+**为什么移除 `OperationEntry.tier`**：语义层由变体唯一决定（`icsgen.spec.model.VARIANT_TIER`）。catalog 再声明一个 tier 就成了第二事实源，而且对「同一操作类型既有合法变体（normal）又有异常变体（exception）」的情况必然自相矛盾 —— 例如 `modbus.read_coils` 声明 `tier: legit` 却同时声明 `variants: [normal, boundary, exception]`。catalog 因此只声明变体，tier 一律由变体推导。相应地，catalog 模型开启 `extra="forbid"`，YAML 里残留的 `tier:` 键会在加载期直接报错，而不是被静默忽略。
+
 **布局清单**（请求/响应均不含功能码字节，功能码由适配器单独拼装）：
 
 | 布局名 | 功能码 | 请求字段 | 响应字段 |
 |---|---|---|---|
-| `fc01` / `fc02` / `fc03` / `fc04` | 0x01–0x04 | start_addr u16, quantity u16 | byte_count u8(count_of values, adjust×2), values u16(count_from byte_count) |
-| `fc05` | 0x05 | start_addr u16, value u16 | start_addr u16, value u16 |
-| `fc06` | 0x06 | start_addr u16, value u16 | start_addr u16, value u16 |
+| `fc01` / `fc02` / `fc03` / `fc04` | 0x01–0x04 | start_addr u16, quantity u16 | byte_count u8(count_of values, adjust×2), values u16(count_from byte_count, len_from_request quantity) |
+| `fc05` / `fc06` | 0x05–0x06 | start_addr u16, value u16 | 同请求 |
 | `fc07` | 0x07 | 无 | status u8 |
-| `fc08` | 0x08 | sub_function u16, data u16 | sub_function u16, data u16 |
+| `fc08` | 0x08 | sub_function u16, data u16 | 同请求 |
 | `fc0b` | 0x0B | 无 | status u16, event_count u16 |
-| `fc0c` | 0x0C | 无 | status u16, event_count u16, message_count u16, event_log_count u16, log bytes(count_from log_length) |
+| `fc0c` | 0x0C | 无 | status u16, event_count u16, message_count u16, event_log_count u8(count_of log), log u16(count_from event_log_count, count_is_elements) |
 | `fc0f` | 0x0F | start_addr u16, quantity u16, byte_count u8(count_of values), values bytes(count_from byte_count) | start_addr u16, quantity u16 |
 | `fc10` | 0x10 | start_addr u16, quantity u16, byte_count u8(count_of values, adjust×2), values u16(count_from byte_count) | start_addr u16, quantity u16 |
-| `fc11` | 0x11 | 无 | byte_count u8, slave_id bytes(count_from byte_count) |
-| `fc12` | 0x12 | reference_type u16, file_number u16, record_number u16, record_length u16 | file_response_length u16, reference_type u16, file_number u16, record_number u16, record_data_length u16, data_length u16, data bytes(count_from data_length) |
-| `fc14` | 0x14 | 同 fc12 请求 | 同 fc12 响应 |
-| `fc15` | 0x15 | 同 fc12 请求 | file_response_length u16, reference_type u16, file_number u16, record_number u16, record_length u16 |
-| `fc16` | 0x16 | mask u16, value u16 | mask u16, value u16 |
-| `fc17` | 0x17 | read_addr u16, read_quantity u16, write_addr u16, write_quantity u16, write_byte_count u8(count_of write_values, adjust×2), write_values u16(count_from write_byte_count), read_byte_count u8(count_of read_values, adjust×2), read_values u16(count_from read_byte_count) | 同请求结构 |
-| `fc18` | 0x18 | 无 | byte_count u16, fifo_values u16(count_from byte_count) |
-| `fc2b` | 0x2B | mei_type u8, read_device_id_code u8, object_id u8 | mei_type u8, read_device_id_code u8, conformity_level u8, more_follows u8, next_object_id u8, number_of_objects u8, object_id u8, object_size u8, object_value bytes(count_from object_size) |
+| `fc11` | 0x11 | 无 | byte_count u8(count_of slave_id, adjust+1), slave_id bytes(count_from byte_count, count_adjust−1), run_indicator_status u8 |
+| `fc14` | 0x14 | byte_count u8, reference_type u8, file_number u16, record_number u16, record_length u16 | byte_count u8(count_of record_data, adjust+2), file_response_length u8(count_of record_data, adjust+1), reference_type u8, record_data bytes(count_from file_response_length, count_adjust−1) |
+| `fc15` | 0x15 | byte_count u8(count_of record_data, adjust+7), reference_type u8, file_number u16, record_number u16, record_length u16(count_of record_data, adjust÷2), record_data bytes(count_from record_length, count_is_elements, count_adjust×2) | 同请求 |
+| `fc16` | 0x16 | start_addr u16, and_mask u16, or_mask u16 | 同请求 |
+| `fc17` | 0x17 | read_addr u16, read_quantity u16, write_addr u16, write_quantity u16, write_byte_count u8(count_of write_values, adjust×2), write_values u16(count_from write_byte_count) | byte_count u8(count_of values, adjust×2), values u16(count_from byte_count, len_from_request read_quantity) |
+| `fc18` | 0x18 | fifo_pointer_address u16 | byte_count u16(count_of fifo_values, adjust×2+2), fifo_count u16(count_of fifo_values), fifo_values u16(count_from fifo_count, count_is_elements) |
+| `fc2b` | 0x2B | mei_type u8, read_device_id_code u8, object_id u8 | mei_type u8, read_device_id_code u8, conformity_level u8, more_follows u8, next_object_id u8, number_of_objects u8, object_id u8, object_size u8(count_of object_value), object_value bytes(count_from object_size) |
+
+> 规范说明：`0x12` 是保留空档（`0x11` 与 `0x14` 之间），不存在「读文件记录」功能码 —— 读文件记录是 `0x14`，写文件记录是 `0x15`。FC0x16 是掩码写寄存器（start_addr + and_mask + or_mask），FC0x17 的响应与 FC0x03 同构（byte_count + 寄存器数组），FC0x18 的响应是 byte_count + fifo_count + FIFO 数据。
+
+**操作类型构成**（41 个 = 规范功能码 17 + MEI 2 + 诊断子功能 21 + 协议级异常 1）：
+
+| 类别 | 数量 | 变体 |
+|---|---|---|
+| 读取类（FC01–FC04） | 4 | normal, boundary, exception |
+| 写入类（FC05、FC06、FC0F、FC10、FC16） | 5 | normal, boundary, exception |
+| 状态与诊断类（FC07、FC0B、FC0C、FC11、FC18） | 5 | normal, exception |
+| 文件与读写类（FC14、FC15、FC17） | 3 | normal, boundary, exception |
+| 设备标识 MEI（basic / specific 两种访问方式） | 2 | normal, boundary, exception |
+| 诊断子功能（FC0x08） | 21 | normal, exception |
+| 协议级异常（非法功能码） | 1 | illegal_fc, exception |
+
+合计：(操作类型, 变体) 组合 = 14×3 + 5×2 + 21×2 + 1×2 = 96，覆盖条目数 = 96 × 2（tcp + rtu）= 192。
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -1189,6 +1213,8 @@ EOF
 """Modbus 字段布局与操作目录。"""
 
 from pathlib import Path
+
+import pytest
 
 from icsgen.codec.decoder import decode
 from icsgen.codec.encoder import encode
@@ -1201,6 +1227,9 @@ from icsgen.spec.catalog import load_catalog
 
 CATALOG_PATH = Path(__file__).resolve().parents[1] / "icsgen" / "protocols" / "modbus" / "catalog.yaml"
 
+#: catalog 中允许出现的全部变体
+KNOWN_VARIANTS = {"normal", "boundary", "exception", "illegal_fc", "malformed"}
+
 
 def test_all_layouts_have_request_and_response():
     for name, layout in LAYOUTS.items():
@@ -1209,12 +1238,8 @@ def test_all_layouts_have_request_and_response():
 
 
 def test_get_layout_unknown_raises():
-    try:
+    with pytest.raises(KeyError, match="fc99"):
         get_layout("fc99")
-    except KeyError as exc:
-        assert "fc99" in str(exc)
-    else:
-        raise AssertionError("应当抛出 KeyError")
 
 
 def test_fc03_round_trip():
@@ -1249,6 +1274,131 @@ def test_fc08_carries_sub_function():
     assert raw == b"\x00\x04\x00\x00"
 
 
+def test_fc16_mask_write_carries_three_fields():
+    """FC16 掩码写寄存器 = 起始地址 + 与掩码 + 或掩码。"""
+    layout = get_layout("fc16")
+    raw = encode(layout.request, {"start_addr": 1, "and_mask": 0xFF00, "or_mask": 0x00FF})
+    assert raw == b"\x00\x01\xff\x00\x00\xff"
+    assert decode(layout.request, raw) == {
+        "start_addr": 1,
+        "and_mask": 0xFF00,
+        "or_mask": 0x00FF,
+    }
+
+
+def test_fc18_response_matches_spec():
+    """FC18 响应 = byte_count(2 + 2×元素数) + fifo_count(元素数) + FIFO 数据。"""
+    layout = get_layout("fc18")
+    raw = encode(layout.response, {"fifo_values": [1, 2, 3]})
+    assert raw == b"\x00\x08\x00\x03\x00\x01\x00\x02\x00\x03"
+    assert decode(layout.response, raw) == {
+        "byte_count": 8,
+        "fifo_count": 3,
+        "fifo_values": [1, 2, 3],
+    }
+
+
+def test_fc14_request_matches_spec():
+    """FC14 读文件记录请求 = byte_count(7) + 引用类型 + 文件号 + 记录号 + 记录长度。"""
+    layout = get_layout("fc14")
+    raw = encode(
+        layout.request,
+        {"reference_type": 6, "file_number": 4, "record_number": 0, "record_length": 1},
+    )
+    assert raw == b"\x07\x06\x00\x04\x00\x00\x00\x01"
+
+
+def test_fc14_response_length_fields():
+    """FC14 响应的 byte_count = 数据长度 + 2，file_response_length = 数据长度 + 1。"""
+    layout = get_layout("fc14")
+    raw = encode(layout.response, {"record_data": b"\x00\x01\x00\x02"})
+    assert raw == b"\x06\x05\x06\x00\x01\x00\x02"
+    assert decode(layout.response, raw) == {
+        "byte_count": 6,
+        "file_response_length": 5,
+        "reference_type": 6,
+        "record_data": b"\x00\x01\x00\x02",
+    }
+
+
+def test_fc15_request_length_fields():
+    """FC15 写文件记录：byte_count = 数据长度 + 7，record_length = 寄存器数。"""
+    layout = get_layout("fc15")
+    raw = encode(layout.request, {"record_data": b"\x00\x01\x00\x02"})
+    assert raw == b"\x0b\x06\x00\x00\x00\x00\x00\x02\x00\x01\x00\x02"
+
+
+def test_fc15_decodes_record_data():
+    """FC15 记录长度以寄存器计，字节数是它的两倍。"""
+    layout = get_layout("fc15")
+    raw = b"\x0b\x06\x00\x00\x00\x00\x00\x02\x00\x01\x00\x02"
+    assert decode(layout.request, raw) == {
+        "byte_count": 11,
+        "reference_type": 6,
+        "file_number": 0,
+        "record_number": 0,
+        "record_length": 2,
+        "record_data": b"\x00\x01\x00\x02",
+    }
+
+
+def test_fc11_report_slave_id_length():
+    """FC11 响应 = byte_count(标识长度 + 1) + 标识 + 运行指示状态。"""
+    layout = get_layout("fc11")
+    raw = encode(layout.response, {"slave_id": b"PLC-1"})
+    assert raw == b"\x06PLC-1\xff"
+    assert decode(layout.response, raw) == {
+        "byte_count": 6,
+        "slave_id": b"PLC-1",
+        "run_indicator_status": 0xFF,
+    }
+
+
+def test_fc0c_event_log_count_is_element_count():
+    """FC0C 的 event_log_count 是事件条数，不是字节数。"""
+    layout = get_layout("fc0c")
+    raw = encode(layout.response, {"log": [0x0001, 0x0002]})
+    assert raw == b"\x00\x00\x00\x00\x00\x00\x02\x00\x01\x00\x02"
+    assert decode(layout.response, raw) == {
+        "status": 0,
+        "event_count": 0,
+        "message_count": 0,
+        "event_log_count": 2,
+        "log": [1, 2],
+    }
+
+
+def test_fc17_request_layout():
+    """FC17 请求的 write_byte_count = 写入寄存器数 × 2。"""
+    layout = get_layout("fc17")
+    raw = encode(
+        layout.request,
+        {
+            "read_addr": 0,
+            "read_quantity": 2,
+            "write_addr": 10,
+            "write_quantity": 1,
+            "write_values": [0x1234],
+        },
+    )
+    assert raw == b"\x00\x00\x00\x02\x00\x0a\x00\x01\x02\x12\x34"
+
+
+def test_fc17_response_layout():
+    """FC17 响应与 FC03 同构：byte_count + 寄存器数组。"""
+    layout = get_layout("fc17")
+    raw = encode(layout.response, {"values": [1, 2]})
+    assert raw == b"\x04\x00\x01\x00\x02"
+
+
+def test_fc2b_response_carries_single_object():
+    """FC2B 响应带一个对象：对象长度 + 对象值。"""
+    layout = get_layout("fc2b")
+    raw = encode(layout.response, {"object_value": b"\x01\x02"})
+    assert raw == b"\x0e\x01\x83\x00\x00\x01\x00\x02\x01\x02"
+    assert decode(layout.response, raw)["object_value"] == b"\x01\x02"
+
+
 def test_diagnostic_subfunction_table_has_twenty_one_entries():
     assert len(DIAGNOSTIC_SUBFUNCTIONS) == 21
     assert DIAGNOSTIC_SUBFUNCTIONS[0x0004] == "Force Listen Only Mode"
@@ -1260,6 +1410,13 @@ def test_catalog_declares_operation_types_and_transports():
     assert catalog.protocol == "modbus"
     assert catalog.count() == 41
     assert catalog.transports == ("tcp", "rtu")
+
+
+def test_catalog_declares_ninety_six_variants():
+    """catalog 声明的 (操作类型, 变体) 组合共 96 个。"""
+    catalog = load_catalog(CATALOG_PATH)
+    total = sum(len(entry.variants) for entry in catalog.operations.values())
+    assert total == 96
 
 
 def test_catalog_coverage_count_meets_floor():
@@ -1276,40 +1433,250 @@ def test_every_catalog_entry_references_existing_layout():
 
 
 def test_diagnostic_operations_cover_all_subfunctions():
-    """21 个诊断子功能各自是一个操作类型。"""
+    """21 个诊断子功能各自是一个操作类型，且子功能码与诊断表一致。"""
     catalog = load_catalog(CATALOG_PATH)
     diag = [n for n in catalog.operations if n.startswith("modbus.diagnostics.")]
     assert len(diag) == 21
+    declared = {
+        catalog.get(name).params["sub_function"]["default"] for name in diag
+    }
+    assert declared == set(DIAGNOSTIC_SUBFUNCTIONS)
 
 
-def test_all_entries_declare_normal_variant():
+def test_every_catalog_entry_declares_known_variants():
     catalog = load_catalog(CATALOG_PATH)
     for name, entry in catalog.operations.items():
-        assert "normal" in entry.variants, f"{name} 未声明 normal 变体"
+        assert entry.variants, f"{name} 未声明任何变体"
+        for variant in entry.variants:
+            assert variant in KNOWN_VARIANTS, f"{name} 声明了未知变体 {variant!r}"
+
+
+def test_catalog_covers_all_variant_kinds():
+    """normal/boundary/exception/illegal_fc 都由 catalog 声明；malformed 只由变异引擎产生。"""
+    catalog = load_catalog(CATALOG_PATH)
+    kinds = {v for entry in catalog.operations.values() for v in entry.variants}
+    assert kinds == {"normal", "boundary", "exception", "illegal_fc"}
+
+
+def test_illegal_function_code_entry_declares_abnormal_variants():
+    """非法功能码是协议级异常，只能用 abnormal 层的变体。"""
+    catalog = load_catalog(CATALOG_PATH)
+    entry = catalog.get("modbus.illegal_function_code")
+    assert entry.func_code == 99
+    assert set(entry.variants) == {"illegal_fc", "exception"}
+```
+
+在 `tests/test_codec.py` 末尾追加 4 个用例：
+
+```python
+def test_decode_count_is_elements_keeps_count():
+    """被引用字段给出的是元素个数时不再除以元素宽度。"""
+    fields = (
+        Field("fifo_count", "uint16"),
+        Field("fifo_values", "uint16", count_from="fifo_count", count_is_elements=True),
+    )
+    assert decode(fields, b"\x00\x03\x00\x01\x00\x02\x00\x03") == {
+        "fifo_count": 3,
+        "fifo_values": [1, 2, 3],
+    }
+
+
+def test_decode_count_adjust_transforms_element_count():
+    """count_adjust 在换算后对元素个数做一次修正。"""
+    fields = (
+        Field("record_length", "uint16"),
+        Field("record_data", "bytes", count_from="record_length", count_adjust=lambda n: n * 2),
+    )
+    assert decode(fields, b"\x00\x02\x00\x01\x00\x02") == {
+        "record_length": 2,
+        "record_data": b"\x00\x01\x00\x02",
+    }
+
+
+def test_encode_count_of_falls_back_to_referenced_default():
+    """被引用数组没有取值时，长度字段按被引用字段的缺省值计算。"""
+    fields = (
+        Field("byte_count", "uint8", count_of="data", adjust=lambda n: n + 1),
+        Field("data", "bytes", count_from="byte_count", default=b"\x01\x02"),
+    )
+    assert encode(fields, {}) == b"\x03\x01\x02"
+
+
+def test_encode_count_from_falls_back_to_field_default():
+    """数组字段没有取值时用字段缺省值。"""
+    fields = (
+        Field("byte_count", "uint8", count_of="data"),
+        Field("data", "bytes", count_from="byte_count", default=b"\x01\x02"),
+    )
+    assert encode(fields, {}) == b"\x02\x01\x02"
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `python3 -m pytest tests/test_modbus_layouts.py -v`
+Run: `python3 -m pytest tests/test_modbus_layouts.py tests/test_codec.py -v`
 Expected: FAIL —— `ModuleNotFoundError: No module named 'icsgen.protocols'`
 
 - [ ] **Step 3: 写最小实现**
 
 创建 `icsgen/protocols/__init__.py` 与 `icsgen/protocols/modbus/__init__.py`（空文件）。
 
-修改 `icsgen/spec/catalog.py`（Task 3 的文件，本任务为其补上传输维度与覆盖度口径）：
+**（1）扩展 `icsgen/codec/fields.py` 的 `Field`**，新增两个长度换算开关：
 
 ```python
-# (1) CatalogModel 增加 transports 字段
+@dataclass(frozen=True)
+class Field:
+    """一个协议字段的声明。
+
+    count_of:  编码时本字段的值由被引用字段的元素个数决定（被引用字段是数组时取其长度）
+    count_from: 解码时本字段是变长数组，元素个数由被引用字段的值除以本字段类型宽度得出
+    len_from_request: 构造响应时本数组的元素个数取自请求中的该参数，仅用于构造
+    count_is_elements: 被引用字段给出的是元素个数而非字节数时置真，解码不再除以元素宽度
+    count_adjust: 元素个数换算后的线性修正，例如 Modbus FC0x15 的记录长度以寄存器计，
+                  字节数是它的两倍
+    adjust:    写入长度字段前的换算函数，例如 Modbus 的 byte_count = len(values) * 2
+    default:   缺省值，编码时 values 中缺少该字段则使用
+    """
+
+    name: str
+    type: str
+    count_of: str | None = None
+    count_from: str | None = None
+    len_from_request: str | None = None
+    count_is_elements: bool = False
+    count_adjust: Callable[[int], int] | None = None
+    adjust: Callable[[int], int] | None = None
+    default: Any = None
+```
+
+**（2）修改 `icsgen/codec/decoder.py` 的 `count_from` 分支**，按新开关解释元素个数：
+
+```python
+        if f.count_from is not None:
+            referenced = values.get(f.count_from)
+            if referenced is None:
+                raise DecodeError(f"字段 {f.name!r} 依赖的 {f.count_from!r} 尚未解码")
+            width = FIELD_SIZES.get(f.type)
+            if width is None:
+                raise DecodeError(f"未知字段类型 {f.type!r}")
+            count = int(referenced)
+            if not f.count_is_elements:
+                # 引用值是字节计数时换算成元素个数
+                count = count // width
+            if f.count_adjust is not None:
+                count = f.count_adjust(count)
+            if f.type == "bytes":
+                # bytes 类型宽度为 1，长度即字节数，直接切片返回连续字节串
+                if offset + count > len(data):
+                    remaining = len(data) - offset
+                    raise DecodeError(
+                        f"数据不足：偏移 {offset} 需要 {count} 字节，实际剩余 {remaining} 字节"
+                    )
+                values[f.name] = data[offset : offset + count]
+                offset += count
+                continue
+            items: list[Any] = []
+            for _ in range(count):
+                items.append(_unpack_value(f.type, data, offset))
+                offset += width
+            values[f.name] = items
+            continue
+```
+
+**（3）修改 `icsgen/codec/encoder.py`**，`count_of` 与 `count_from` 缺值时回退到字段缺省值：
+
+```python
+def _field_default(fields: tuple[Field, ...], name: str) -> Any:
+    """取同名字段的缺省值。"""
+    for other in fields:
+        if other.name == name:
+            return other.default
+    return None
+
+
+def encode(fields: tuple[Field, ...], values: Mapping[str, Any]) -> bytes:
+    """按 fields 声明把 values 编码成字节。
+
+    count_of 字段写入被引用数组的长度（经 adjust 换算）；
+    count_from 字段直接写入 values 中对应数组的各元素。
+    数组与被引用字段都没有取值时，退回字段声明的缺省值。
+    """
+    out = bytearray()
+    for f in fields:
+        if f.count_of is not None:
+            referenced = values.get(f.count_of)
+            if referenced is None:
+                referenced = _field_default(fields, f.count_of)
+            if referenced is None:
+                raise CodecError(f"字段 {f.name!r} 依赖的 {f.count_of!r} 缺失")
+            if isinstance(referenced, (list, tuple, bytes, bytearray)):
+                count = len(referenced)
+            else:
+                count = int(referenced)
+            if f.adjust is not None:
+                count = f.adjust(count)
+            out += _pack_value(f.type, count)
+            continue
+        if f.count_from is not None:
+            items = values.get(f.name)
+            if items is None:
+                items = f.default
+            if items is None:
+                raise CodecError(f"缺少数组字段 {f.name!r}")
+            # bytes 类型的变长字段，其元素是 1 字节整数或 1 字节字节串，
+            # 两种形态都由 _pack_value 统一处理，编码结果与解码器对称。
+            for item in items:
+                out += _pack_value(f.type, item)
+            continue
+        if f.name not in values:
+            if f.default is None:
+                raise CodecError(f"缺少字段 {f.name!r} 的值")
+            out += _pack_value(f.type, f.default)
+            continue
+        out += _pack_value(f.type, values[f.name])
+    return bytes(out)
+```
+
+**（4）修改 `icsgen/spec/catalog.py`**（Task 3 的文件）：移除 `OperationEntry.tier`，并让 catalog 模型拒绝未知键。
+
+```python
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class OperationEntry(BaseModel):
+    """catalog 中的一个操作类型条目。
+
+    params 是「参数名 -> 该参数的 JSON Schema 片段」的映射；其中的 default
+    键仅作文档说明，参数缺省值由字段布局的 Field.default 决定，加载时不会
+    自动填充。
+
+    本条目不声明 tier：语义层由变体唯一决定（icsgen.spec.model.VARIANT_TIER），
+    catalog 再声明一个 tier 会成为第二事实源，且对同时含合法变体与异常变体的
+    操作类型必然自相矛盾。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    summary: str = ""
+    layout: str
+    variants: list[str] = Field(default_factory=lambda: ["normal"])
+    params: dict[str, Any] = Field(default_factory=dict)
+    func_code: int | None = None
+
+
 class CatalogModel(BaseModel):
     """catalog.yaml 的结构。"""
+
+    model_config = ConfigDict(extra="forbid")
 
     protocol: str
     transports: list[str] = Field(default_factory=lambda: ["tcp"])
     operations: list[OperationEntry]
+```
 
+`Catalog` 的 `transports` 字段与 `coverage_count()` 方法按 Task 3 已有实现保留：
 
-# (2) Catalog 增加 transports 字段与 coverage_count() 方法
+```python
 @dataclass(frozen=True)
 class Catalog:
     """已加载的操作目录。"""
@@ -1337,35 +1704,20 @@ class Catalog:
         """
         variants = sum(len(entry.variants) for entry in self.operations.values())
         return variants * len(self.transports)
-
-
-# (3) load_catalog 把 transports 传给 Catalog
-def load_catalog(path: Path) -> Catalog:
-    """从 YAML 文件加载 catalog。"""
-    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    model = CatalogModel.model_validate(raw)
-    for entry in model.operations:
-        _check_params_schema(entry, path)
-    operations = {entry.name: entry for entry in model.operations}
-    if len(operations) != len(model.operations):
-        raise ValueError(f"catalog {path} 中存在重复的操作名")
-    return Catalog(
-        protocol=model.protocol,
-        operations=operations,
-        transports=tuple(model.transports),
-    )
 ```
 
-`Catalog` 是 frozen dataclass，新增的 `transports` 字段带默认值，放在 `operations` 之后，
-不会破坏已有的位置参数调用。`Field` 已在该文件的 pydantic 导入中，无需新增导入。
-
-创建 `icsgen/protocols/modbus/layouts.py`：
+**（5）创建 `icsgen/protocols/modbus/layouts.py`**：
 
 ```python
 """Modbus 功能码的字段布局。
 
 布局描述请求与响应 PDU 的字节结构（不含功能码字节本身，功能码由适配器
-单独拼装）。诊断子功能的 21 个变体共享 fc08 布局，仅子功能码默认值不同。
+单独拼装）。字段结构对照 Modbus Application Protocol Specification V1.1b3；
+长度字段的换算关系由 Field 的 count_of / count_from / adjust /
+count_is_elements / count_adjust 声明。
+
+诊断子功能的 21 个子功能各自是一个操作类型，共享 fc08 布局，仅子功能码
+默认值不同。
 """
 
 from __future__ import annotations
@@ -1410,18 +1762,44 @@ _WRITE_SINGLE_LAYOUT = Layout(
     response=(Field("start_addr", "uint16"), Field("value", "uint16")),
 )
 
-_FILE_REQUEST_FIELDS = (
-    Field("reference_type", "uint16"),
-    Field("file_number", "uint16"),
-    Field("record_number", "uint16"),
-    Field("record_length", "uint16"),
+#: FC0x14 读文件记录请求：byte_count(7) + 引用类型 + 文件号 + 记录号 + 记录长度
+_FILE_READ_REQUEST_FIELDS = (
+    Field("byte_count", "uint8", default=7),
+    Field("reference_type", "uint8", default=0x06),
+    Field("file_number", "uint16", default=0),
+    Field("record_number", "uint16", default=0),
+    Field("record_length", "uint16", default=1),
 )
 
-_FILE_RESPONSE_FIELDS = (
-    Field("file_response_length", "uint16"),
-    Field("reference_type", "uint16"),
-    Field("file_number", "uint16"),
-    Field("record_number", "uint16"),
+#: FC0x14 读文件记录响应：两个长度字段都由记录数据长度推出
+_FILE_READ_RESPONSE_FIELDS = (
+    Field("byte_count", "uint8", count_of="record_data", adjust=lambda n: n + 2),
+    Field("file_response_length", "uint8", count_of="record_data", adjust=lambda n: n + 1),
+    Field("reference_type", "uint8", default=0x06),
+    Field(
+        "record_data",
+        "bytes",
+        count_from="file_response_length",
+        count_adjust=lambda n: n - 1,
+        default=b"\x00\x01\x00\x02",
+    ),
+)
+
+#: FC0x15 写文件记录：请求与响应同构（响应是请求的回显）
+_FILE_WRITE_FIELDS = (
+    Field("byte_count", "uint8", count_of="record_data", adjust=lambda n: n + 7),
+    Field("reference_type", "uint8", default=0x06),
+    Field("file_number", "uint16", default=0),
+    Field("record_number", "uint16", default=0),
+    Field("record_length", "uint16", count_of="record_data", adjust=lambda n: n // 2),
+    Field(
+        "record_data",
+        "bytes",
+        count_from="record_length",
+        count_is_elements=True,
+        count_adjust=lambda n: n * 2,
+        default=b"\x00\x01\x00\x02",
+    ),
 )
 
 LAYOUTS: dict[str, Layout] = {
@@ -1446,9 +1824,8 @@ LAYOUTS: dict[str, Layout] = {
             Field("status", "uint16"),
             Field("event_count", "uint16"),
             Field("message_count", "uint16"),
-            Field("event_log_count", "uint16"),
-            Field("log_length", "uint8", count_of="log"),
-            Field("log", "bytes", count_from="log_length"),
+            Field("event_log_count", "uint8", count_of="log"),
+            Field("log", "uint16", count_from="event_log_count", count_is_elements=True, default=(0,)),
         ),
     ),
     "fc0f": Layout(
@@ -1472,35 +1849,36 @@ LAYOUTS: dict[str, Layout] = {
     "fc11": Layout(
         request=(),
         response=(
-            Field("byte_count", "uint8", count_of="slave_id"),
-            Field("slave_id", "bytes", count_from="byte_count"),
-        ),
-    ),
-    "fc12": Layout(
-        request=_FILE_REQUEST_FIELDS,
-        response=_FILE_RESPONSE_FIELDS
-        + (
-            Field("record_data_length", "uint16"),
-            Field("data_length", "uint16"),
-            Field("data", "bytes", count_from="data_length"),
+            Field("byte_count", "uint8", count_of="slave_id", adjust=lambda n: n + 1),
+            Field(
+                "slave_id",
+                "bytes",
+                count_from="byte_count",
+                count_adjust=lambda n: n - 1,
+                default=b"Pymodbus",
+            ),
+            Field("run_indicator_status", "uint8", default=0xFF),
         ),
     ),
     "fc14": Layout(
-        request=_FILE_REQUEST_FIELDS,
-        response=_FILE_RESPONSE_FIELDS
-        + (
-            Field("record_data_length", "uint16"),
-            Field("data_length", "uint16"),
-            Field("data", "bytes", count_from="data_length"),
-        ),
+        request=_FILE_READ_REQUEST_FIELDS,
+        response=_FILE_READ_RESPONSE_FIELDS,
     ),
     "fc15": Layout(
-        request=_FILE_REQUEST_FIELDS,
-        response=_FILE_RESPONSE_FIELDS + (Field("record_length", "uint16"),),
+        request=_FILE_WRITE_FIELDS,
+        response=_FILE_WRITE_FIELDS,
     ),
     "fc16": Layout(
-        request=(Field("mask", "uint16"), Field("value", "uint16")),
-        response=(Field("mask", "uint16"), Field("value", "uint16")),
+        request=(
+            Field("start_addr", "uint16"),
+            Field("and_mask", "uint16"),
+            Field("or_mask", "uint16"),
+        ),
+        response=(
+            Field("start_addr", "uint16"),
+            Field("and_mask", "uint16"),
+            Field("or_mask", "uint16"),
+        ),
     ),
     "fc17": Layout(
         request=(
@@ -1509,44 +1887,37 @@ LAYOUTS: dict[str, Layout] = {
             Field("write_addr", "uint16"),
             Field("write_quantity", "uint16"),
             Field("write_byte_count", "uint8", count_of="write_values", adjust=lambda n: n * 2),
-            Field("write_values", "uint16", count_from="write_byte_count", len_from_request="write_quantity"),
-            Field("read_byte_count", "uint8", count_of="read_values", adjust=lambda n: n * 2),
-            Field("read_values", "uint16", count_from="read_byte_count", len_from_request="read_quantity"),
+            Field("write_values", "uint16", count_from="write_byte_count"),
         ),
         response=(
-            Field("read_addr", "uint16"),
-            Field("read_quantity", "uint16"),
-            Field("write_addr", "uint16"),
-            Field("write_quantity", "uint16"),
-            Field("write_byte_count", "uint8", count_of="write_values", adjust=lambda n: n * 2),
-            Field("write_values", "uint16", count_from="write_byte_count", len_from_request="write_quantity"),
-            Field("read_byte_count", "uint8", count_of="read_values", adjust=lambda n: n * 2),
-            Field("read_values", "uint16", count_from="read_byte_count", len_from_request="read_quantity"),
+            Field("byte_count", "uint8", count_of="values", adjust=lambda n: n * 2),
+            Field("values", "uint16", count_from="byte_count", len_from_request="read_quantity"),
         ),
     ),
     "fc18": Layout(
-        request=(),
+        request=(Field("fifo_pointer_address", "uint16"),),
         response=(
-            Field("byte_count", "uint16", count_of="fifo_values"),
-            Field("fifo_values", "uint16", count_from="byte_count"),
+            Field("byte_count", "uint16", count_of="fifo_values", adjust=lambda n: n * 2 + 2),
+            Field("fifo_count", "uint16", count_of="fifo_values"),
+            Field("fifo_values", "uint16", count_from="fifo_count", count_is_elements=True, default=(0, 1, 2, 3)),
         ),
     ),
     "fc2b": Layout(
         request=(
-            Field("mei_type", "uint8"),
-            Field("read_device_id_code", "uint8"),
-            Field("object_id", "uint8"),
+            Field("mei_type", "uint8", default=0x0E),
+            Field("read_device_id_code", "uint8", default=0x01),
+            Field("object_id", "uint8", default=0x00),
         ),
         response=(
-            Field("mei_type", "uint8"),
-            Field("read_device_id_code", "uint8"),
-            Field("conformity_level", "uint8"),
-            Field("more_follows", "uint8"),
-            Field("next_object_id", "uint8"),
-            Field("number_of_objects", "uint8"),
-            Field("object_id", "uint8"),
-            Field("object_size", "uint8"),
-            Field("object_value", "bytes", count_from="object_size"),
+            Field("mei_type", "uint8", default=0x0E),
+            Field("read_device_id_code", "uint8", default=0x01),
+            Field("conformity_level", "uint8", default=0x83),
+            Field("more_follows", "uint8", default=0x00),
+            Field("next_object_id", "uint8", default=0x00),
+            Field("number_of_objects", "uint8", default=0x01),
+            Field("object_id", "uint8", default=0x00),
+            Field("object_size", "uint8", count_of="object_value"),
+            Field("object_value", "bytes", count_from="object_size", default=b"\x01\x02"),
         ),
     ),
 }
@@ -1560,79 +1931,82 @@ def get_layout(name: str) -> Layout:
         raise KeyError(f"不存在布局 {name!r}，可用布局：{sorted(LAYOUTS)}") from exc
 ```
 
-创建 `icsgen/protocols/modbus/catalog.yaml`：
+**（6）创建 `icsgen/protocols/modbus/catalog.yaml`**：
 
 ```yaml
 protocol: modbus
 transports: [tcp, rtu]
 operations:
-  # ---- 读取类功能码 ----
-  - {name: modbus.read_coils, summary: 读线圈状态 (FC01), layout: fc01, func_code: 1, tier: legit, variants: [normal, boundary, exception], params: {start_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, quantity: {type: integer, minimum: 1, maximum: 2000, default: 1}}}
-  - {name: modbus.read_discrete_inputs, summary: 读离散输入 (FC02), layout: fc02, func_code: 2, tier: legit, variants: [normal, boundary, exception], params: {start_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, quantity: {type: integer, minimum: 1, maximum: 2000, default: 1}}}
-  - {name: modbus.read_holding_registers, summary: 读保持寄存器 (FC03), layout: fc03, func_code: 3, tier: legit, variants: [normal, boundary, exception], params: {start_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, quantity: {type: integer, minimum: 1, maximum: 125, default: 1}}}
-  - {name: modbus.read_input_registers, summary: 读输入寄存器 (FC04), layout: fc04, func_code: 4, tier: legit, variants: [normal, boundary, exception], params: {start_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, quantity: {type: integer, minimum: 1, maximum: 125, default: 1}}}
-  # ---- 写入类功能码 ----
-  - {name: modbus.write_single_coil, summary: 写单个线圈 (FC05), layout: fc05, func_code: 5, tier: legit, variants: [normal, exception], params: {start_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, value: {type: integer, minimum: 0, maximum: 65535, default: 65280}}}
-  - {name: modbus.write_single_register, summary: 写单个保持寄存器 (FC06), layout: fc06, func_code: 6, tier: legit, variants: [normal, exception], params: {start_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, value: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
-  - {name: modbus.write_multiple_coils, summary: 写多个线圈 (FC0F), layout: fc0f, func_code: 15, tier: legit, variants: [normal, boundary, exception], params: {start_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, quantity: {type: integer, minimum: 1, maximum: 1968, default: 8}, values: {type: array, items: {type: integer, minimum: 0, maximum: 255}, minItems: 1, maxItems: 246, default: [255]}}}
-  - {name: modbus.write_multiple_registers, summary: 写多个保持寄存器 (FC10), layout: fc10, func_code: 16, tier: legit, variants: [normal, boundary, exception], params: {start_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, quantity: {type: integer, minimum: 1, maximum: 123, default: 2}, values: {type: array, items: {type: integer, minimum: 0, maximum: 65535}, minItems: 1, maxItems: 123, default: [0]}}}
-  - {name: modbus.mask_write_register, summary: 掩码写寄存器 (FC16), layout: fc16, func_code: 22, tier: legit, variants: [normal, exception], params: {mask: {type: integer, minimum: 0, maximum: 65535, default: 65280}, value: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
-  # ---- 诊断与状态类功能码 ----
-  - {name: modbus.read_exception_status, summary: 读异常状态 (FC07), layout: fc07, func_code: 7, tier: legit, variants: [normal, exception], params: {}}
-  - {name: modbus.get_comm_event_counter, summary: 读通信事件计数器 (FC0B), layout: fc0b, func_code: 11, tier: legit, variants: [normal, exception], params: {}}
-  - {name: modbus.get_comm_event_log, summary: 读通信事件日志 (FC0C), layout: fc0c, func_code: 12, tier: legit, variants: [normal, exception], params: {}}
-  - {name: modbus.report_slave_id, summary: 报告从站 ID (FC11), layout: fc11, func_code: 17, tier: legit, variants: [normal, exception], params: {}}
-  - {name: modbus.read_fifo_queue, summary: 读 FIFO 队列 (FC18), layout: fc18, func_code: 24, tier: legit, variants: [normal, exception], params: {}}
-  # ---- 文件记录类功能码 ----
-  - {name: modbus.read_file_record, summary: 读文件记录 (FC12), layout: fc12, func_code: 18, tier: legit, variants: [normal, exception], params: {reference_type: {type: integer, minimum: 0, maximum: 65535, default: 6}, file_number: {type: integer, minimum: 0, maximum: 65535, default: 0}, record_number: {type: integer, minimum: 0, maximum: 65535, default: 0}, record_length: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
-  - {name: modbus.read_file_record_serial, summary: 读文件记录-串口变体 (FC14), layout: fc14, func_code: 20, tier: legit, variants: [normal, exception], params: {reference_type: {type: integer, minimum: 0, maximum: 65535, default: 6}, file_number: {type: integer, minimum: 0, maximum: 65535, default: 0}, record_number: {type: integer, minimum: 0, maximum: 65535, default: 0}, record_length: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
-  - {name: modbus.write_file_record, summary: 写文件记录 (FC15), layout: fc15, func_code: 21, tier: legit, variants: [normal, exception], params: {reference_type: {type: integer, minimum: 0, maximum: 65535, default: 6}, file_number: {type: integer, minimum: 0, maximum: 65535, default: 0}, record_number: {type: integer, minimum: 0, maximum: 65535, default: 0}, record_length: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
-  - {name: modbus.read_write_multiple_registers, summary: 读写多个保持寄存器 (FC17), layout: fc17, func_code: 23, tier: legit, variants: [normal, exception], params: {read_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, read_quantity: {type: integer, minimum: 1, maximum: 125, default: 1}, write_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, write_quantity: {type: integer, minimum: 1, maximum: 121, default: 1}}}
-  # ---- 设备标识 ----
-  - {name: modbus.read_device_identification, summary: 读设备标识 MEI (FC2B), layout: fc2b, func_code: 43, tier: legit, variants: [normal, exception], params: {read_device_id_code: {type: integer, minimum: 0, maximum: 255, default: 1}, object_id: {type: integer, minimum: 0, maximum: 255, default: 0}}}
+  # ---- 读取类功能码（4 个）----
+  - {name: modbus.read_coils, summary: 读线圈状态 (FC01), layout: fc01, func_code: 1, variants: [normal, boundary, exception], params: {start_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, quantity: {type: integer, minimum: 1, maximum: 2000, default: 8}}}
+  - {name: modbus.read_discrete_inputs, summary: 读离散输入 (FC02), layout: fc02, func_code: 2, variants: [normal, boundary, exception], params: {start_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, quantity: {type: integer, minimum: 1, maximum: 2000, default: 8}}}
+  - {name: modbus.read_holding_registers, summary: 读保持寄存器 (FC03), layout: fc03, func_code: 3, variants: [normal, boundary, exception], params: {start_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, quantity: {type: integer, minimum: 1, maximum: 125, default: 3}}}
+  - {name: modbus.read_input_registers, summary: 读输入寄存器 (FC04), layout: fc04, func_code: 4, variants: [normal, boundary, exception], params: {start_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, quantity: {type: integer, minimum: 1, maximum: 125, default: 3}}}
+  # ---- 写入类功能码（5 个）----
+  - {name: modbus.write_single_coil, summary: 写单个线圈 (FC05), layout: fc05, func_code: 5, variants: [normal, boundary, exception], params: {start_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, value: {type: integer, minimum: 0, maximum: 65535, default: 65280}}}
+  - {name: modbus.write_single_register, summary: 写单个保持寄存器 (FC06), layout: fc06, func_code: 6, variants: [normal, boundary, exception], params: {start_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, value: {type: integer, minimum: 0, maximum: 65535, default: 1}}}
+  - {name: modbus.write_multiple_coils, summary: 写多个线圈 (FC0F), layout: fc0f, func_code: 15, variants: [normal, boundary, exception], params: {start_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, quantity: {type: integer, minimum: 1, maximum: 1968, default: 8}, values: {type: array, items: {type: integer, minimum: 0, maximum: 255}, minItems: 1, maxItems: 246, default: [255]}}}
+  - {name: modbus.write_multiple_registers, summary: 写多个保持寄存器 (FC10), layout: fc10, func_code: 16, variants: [normal, boundary, exception], params: {start_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, quantity: {type: integer, minimum: 1, maximum: 123, default: 2}, values: {type: array, items: {type: integer, minimum: 0, maximum: 65535}, minItems: 1, maxItems: 123, default: [1]}}}
+  - {name: modbus.mask_write_register, summary: 掩码写寄存器 (FC16), layout: fc16, func_code: 22, variants: [normal, boundary, exception], params: {start_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, and_mask: {type: integer, minimum: 0, maximum: 65535, default: 65280}, or_mask: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
+  # ---- 状态与诊断类功能码（5 个）----
+  - {name: modbus.read_exception_status, summary: 读异常状态 (FC07), layout: fc07, func_code: 7, variants: [normal, exception], params: {}}
+  - {name: modbus.get_comm_event_counter, summary: 读通信事件计数器 (FC0B), layout: fc0b, func_code: 11, variants: [normal, exception], params: {}}
+  - {name: modbus.get_comm_event_log, summary: 读通信事件日志 (FC0C), layout: fc0c, func_code: 12, variants: [normal, exception], params: {}}
+  - {name: modbus.report_slave_id, summary: 报告从站 ID (FC11), layout: fc11, func_code: 17, variants: [normal, exception], params: {}}
+  - {name: modbus.read_fifo_queue, summary: 读 FIFO 队列 (FC18), layout: fc18, func_code: 24, variants: [normal, exception], params: {fifo_pointer_address: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
+  # ---- 文件记录与读写类功能码（3 个）----
+  - {name: modbus.read_file_record, summary: 读文件记录 (FC14), layout: fc14, func_code: 20, variants: [normal, boundary, exception], params: {reference_type: {type: integer, minimum: 0, maximum: 255, default: 6}, file_number: {type: integer, minimum: 0, maximum: 65535, default: 4}, record_number: {type: integer, minimum: 0, maximum: 65535, default: 0}, record_length: {type: integer, minimum: 1, maximum: 123, default: 1}}}
+  - {name: modbus.write_file_record, summary: 写文件记录 (FC15), layout: fc15, func_code: 21, variants: [normal, boundary, exception], params: {reference_type: {type: integer, minimum: 0, maximum: 255, default: 6}, file_number: {type: integer, minimum: 0, maximum: 65535, default: 4}, record_number: {type: integer, minimum: 0, maximum: 65535, default: 0}, record_data: {type: array, items: {type: integer, minimum: 0, maximum: 255}, minItems: 2, maxItems: 246, default: [0, 1, 0, 2]}}}
+  - {name: modbus.read_write_multiple_registers, summary: 读写多个保持寄存器 (FC17), layout: fc17, func_code: 23, variants: [normal, boundary, exception], params: {read_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, read_quantity: {type: integer, minimum: 1, maximum: 125, default: 1}, write_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, write_quantity: {type: integer, minimum: 1, maximum: 121, default: 1}}}
+  # ---- 设备标识 MEI（2 个：basic 与 specific 两种访问方式）----
+  - {name: modbus.read_device_identification, summary: 读设备标识 MEI-basic (FC2B), layout: fc2b, func_code: 43, variants: [normal, boundary, exception], params: {read_device_id_code: {type: integer, minimum: 1, maximum: 3, default: 1}, object_id: {type: integer, minimum: 0, maximum: 255, default: 0}}}
+  - {name: modbus.read_device_identification_specific, summary: 读设备标识 MEI-specific (FC2B), layout: fc2b, func_code: 43, variants: [normal, boundary, exception], params: {read_device_id_code: {type: integer, minimum: 4, maximum: 4, default: 4}, object_id: {type: integer, minimum: 0, maximum: 255, default: 0}}}
   # ---- 诊断子功能：21 个独立操作类型，共享 fc08 布局 ----
-  - {name: modbus.diagnostics.return_query_data, summary: 诊断-返回查询数据 (FC08/00), layout: fc08, func_code: 8, tier: legit, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 0}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
-  - {name: modbus.diagnostics.restart_communications_option, summary: 诊断-重启通信选项 (FC08/01), layout: fc08, func_code: 8, tier: legit, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 1}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
-  - {name: modbus.diagnostics.return_diagnostic_register, summary: 诊断-返回诊断寄存器 (FC08/02), layout: fc08, func_code: 8, tier: legit, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 2}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
-  - {name: modbus.diagnostics.change_ascii_input_delimiter, summary: 诊断-更改 ASCII 输入定界符 (FC08/03), layout: fc08, func_code: 8, tier: legit, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 3}, data: {type: integer, minimum: 0, maximum: 65535, default: 10}}}
-  - {name: modbus.diagnostics.force_listen_only_mode, summary: 诊断-强制仅监听模式 (FC08/04), layout: fc08, func_code: 8, tier: legit, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 4}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
-  - {name: modbus.diagnostics.change_byte_count, summary: 诊断-更改字节计数 (FC08/05), layout: fc08, func_code: 8, tier: legit, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 5}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
-  - {name: modbus.diagnostics.change_word_count, summary: 诊断-更改字计数 (FC08/06), layout: fc08, func_code: 8, tier: legit, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 6}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
-  - {name: modbus.diagnostics.get_modify_modbus_plus_parameters, summary: 诊断-获取/修改 Modbus Plus 参数 (FC08/08), layout: fc08, func_code: 8, tier: legit, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 8}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
-  - {name: modbus.diagnostics.clear_counters_and_diagnostic_register, summary: 诊断-清除计数器和诊断寄存器 (FC08/0A), layout: fc08, func_code: 8, tier: legit, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 10}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
-  - {name: modbus.diagnostics.return_bus_message_count, summary: 诊断-返回总线消息计数 (FC08/0B), layout: fc08, func_code: 8, tier: legit, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 11}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
-  - {name: modbus.diagnostics.return_bus_communication_error_count, summary: 诊断-返回总线通信错误计数 (FC08/0C), layout: fc08, func_code: 8, tier: legit, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 12}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
-  - {name: modbus.diagnostics.return_bus_exception_error_count, summary: 诊断-返回总线异常错误计数 (FC08/0D), layout: fc08, func_code: 8, tier: legit, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 13}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
-  - {name: modbus.diagnostics.return_slave_message_count, summary: 诊断-返回从站消息计数 (FC08/0E), layout: fc08, func_code: 8, tier: legit, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 14}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
-  - {name: modbus.diagnostics.return_slave_no_response_count, summary: 诊断-返回从站无响应计数 (FC08/0F), layout: fc08, func_code: 8, tier: legit, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 15}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
-  - {name: modbus.diagnostics.return_slave_nak_count, summary: 诊断-返回从站 NAK 计数 (FC08/10), layout: fc08, func_code: 8, tier: legit, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 16}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
-  - {name: modbus.diagnostics.return_slave_busy_count, summary: 诊断-返回从站忙计数 (FC08/11), layout: fc08, func_code: 8, tier: legit, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 17}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
-  - {name: modbus.diagnostics.return_bus_character_overrun_count, summary: 诊断-返回总线字符溢出计数 (FC08/12), layout: fc08, func_code: 8, tier: legit, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 18}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
-  - {name: modbus.diagnostics.clear_overrun_counter_and_flag, summary: 诊断-清除溢出计数器与标志 (FC08/14), layout: fc08, func_code: 8, tier: legit, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 20}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
-  - {name: modbus.diagnostics.get_clear_modbus_plus_request, summary: 诊断-获取清除 Modbus Plus 请求 (FC08/15), layout: fc08, func_code: 8, tier: legit, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 21}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
-  - {name: modbus.diagnostics.return_io_overrun_count, summary: 诊断-返回 I/O 溢出计数 (FC08/17), layout: fc08, func_code: 8, tier: legit, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 23}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
-  - {name: modbus.diagnostics.clear_io_overrun_counter_and_flag, summary: 诊断-清除 I/O 溢出计数器与标志 (FC08/18), layout: fc08, func_code: 8, tier: legit, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 24}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
-  # ---- 协议级异常：非法功能码 ----
-  - {name: modbus.illegal_function_code, summary: 非法/保留功能码, layout: fc01, func_code: 99, tier: abnormal, variants: [normal], params: {raw_function_code: {type: integer, minimum: 0, maximum: 255, default: 99}, start_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, quantity: {type: integer, minimum: 1, maximum: 2000, default: 1}}}
+  - {name: modbus.diagnostics.return_query_data, summary: 诊断-返回查询数据 (FC08/00), layout: fc08, func_code: 8, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 0}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
+  - {name: modbus.diagnostics.restart_communications_option, summary: 诊断-重启通信选项 (FC08/01), layout: fc08, func_code: 8, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 1}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
+  - {name: modbus.diagnostics.return_diagnostic_register, summary: 诊断-返回诊断寄存器 (FC08/02), layout: fc08, func_code: 8, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 2}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
+  - {name: modbus.diagnostics.change_ascii_input_delimiter, summary: 诊断-更改 ASCII 输入定界符 (FC08/03), layout: fc08, func_code: 8, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 3}, data: {type: integer, minimum: 0, maximum: 65535, default: 10}}}
+  - {name: modbus.diagnostics.force_listen_only_mode, summary: 诊断-强制仅监听模式 (FC08/04), layout: fc08, func_code: 8, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 4}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
+  - {name: modbus.diagnostics.change_byte_count, summary: 诊断-更改字节计数 (FC08/05), layout: fc08, func_code: 8, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 5}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
+  - {name: modbus.diagnostics.change_word_count, summary: 诊断-更改字计数 (FC08/06), layout: fc08, func_code: 8, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 6}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
+  - {name: modbus.diagnostics.get_modify_modbus_plus_parameters, summary: 诊断-获取/修改 Modbus Plus 参数 (FC08/08), layout: fc08, func_code: 8, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 8}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
+  - {name: modbus.diagnostics.clear_counters_and_diagnostic_register, summary: 诊断-清除计数器和诊断寄存器 (FC08/0A), layout: fc08, func_code: 8, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 10}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
+  - {name: modbus.diagnostics.return_bus_message_count, summary: 诊断-返回总线消息计数 (FC08/0B), layout: fc08, func_code: 8, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 11}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
+  - {name: modbus.diagnostics.return_bus_communication_error_count, summary: 诊断-返回总线通信错误计数 (FC08/0C), layout: fc08, func_code: 8, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 12}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
+  - {name: modbus.diagnostics.return_bus_exception_error_count, summary: 诊断-返回总线异常错误计数 (FC08/0D), layout: fc08, func_code: 8, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 13}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
+  - {name: modbus.diagnostics.return_slave_message_count, summary: 诊断-返回从站消息计数 (FC08/0E), layout: fc08, func_code: 8, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 14}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
+  - {name: modbus.diagnostics.return_slave_no_response_count, summary: 诊断-返回从站无响应计数 (FC08/0F), layout: fc08, func_code: 8, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 15}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
+  - {name: modbus.diagnostics.return_slave_nak_count, summary: 诊断-返回从站 NAK 计数 (FC08/10), layout: fc08, func_code: 8, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 16}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
+  - {name: modbus.diagnostics.return_slave_busy_count, summary: 诊断-返回从站忙计数 (FC08/11), layout: fc08, func_code: 8, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 17}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
+  - {name: modbus.diagnostics.return_bus_character_overrun_count, summary: 诊断-返回总线字符溢出计数 (FC08/12), layout: fc08, func_code: 8, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 18}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
+  - {name: modbus.diagnostics.clear_overrun_counter_and_flag, summary: 诊断-清除溢出计数器与标志 (FC08/14), layout: fc08, func_code: 8, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 20}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
+  - {name: modbus.diagnostics.get_clear_modbus_plus_request, summary: 诊断-获取清除 Modbus Plus 请求 (FC08/15), layout: fc08, func_code: 8, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 21}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
+  - {name: modbus.diagnostics.return_io_overrun_count, summary: 诊断-返回 I/O 溢出计数 (FC08/17), layout: fc08, func_code: 8, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 23}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
+  - {name: modbus.diagnostics.clear_io_overrun_counter_and_flag, summary: 诊断-清除 I/O 溢出计数器与标志 (FC08/18), layout: fc08, func_code: 8, variants: [normal, exception], params: {sub_function: {type: integer, minimum: 0, maximum: 65535, default: 24}, data: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
+  # ---- 协议级异常：非法功能码（0x63 是保留值）----
+  - {name: modbus.illegal_function_code, summary: 非法/保留功能码, layout: fc01, func_code: 99, variants: [illegal_fc, exception], params: {start_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, quantity: {type: integer, minimum: 1, maximum: 2000, default: 1}}}
 ```
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `python3 -m pytest tests/test_modbus_layouts.py -v`
-Expected: PASS —— 12 passed
+Run: `python3 -m pytest tests/test_modbus_layouts.py tests/test_codec.py -v`
+Expected: PASS —— 26 + 18 = 44 passed
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add icsgen/protocols/ icsgen/spec/catalog.py tests/test_modbus_layouts.py
+git add icsgen/protocols/ icsgen/spec/catalog.py icsgen/codec/ tests/test_modbus_layouts.py tests/test_codec.py
 git commit -m "$(cat <<'EOF'
-feat: Modbus 字段布局与 41 个操作类型的操作目录
+fix: 按 Modbus 规范校正字段布局，去掉 catalog 的 tier 第二事实源
 
-layouts.py 声明各功能码的请求/响应字节结构，诊断 21 个子功能共享
-fc08 布局。catalog.yaml 声明 41 个操作类型及其参数 schema，
-覆盖规范 19 个功能码 + MEI 0x2B + 21 个诊断子功能 + 非法功能码，
-并声明 tcp 与 rtu 两种传输。catalog 侧补上 coverage_count()，
-作为 §15 丰富度指标的统一度量口径。
+八个布局的字段结构与规范不符（fc0c/fc11/fc14/fc15/fc16/fc17/fc18/fc2b），
+0x12 是保留空档而非读文件记录 —— 一并按规范重写并补齐对应测试。
+
+编解码内核新增 count_is_elements 与 count_adjust 两个长度换算开关，
+支持「元素计数」形态的长度字段；编码缺值时回退到字段缺省值。
+
+catalog 移除 OperationEntry.tier：语义层由变体唯一决定，
+catalog 再声明 tier 会与「同一操作类型既有合法变体又有异常变体」自相矛盾。
 
 Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
 EOF
@@ -1651,17 +2025,20 @@ EOF
 - Consumes: `icsgen.codec.fields.Layout`、`icsgen.protocols.modbus.layouts.get_layout`（Task 4）、`icsgen.spec.model.Variant`（Task 1）
 - Produces:
   - `icsgen.protocols.modbus.variants.VariantPlan`：`frozen dataclass`，字段 `func_code: int`、`request_values: dict[str, Any]`、`response_values: dict[str, Any]`、`is_exception: bool`、`metadata: dict[str, Any]`
-  - `icsgen.protocols.modbus.variants.plan_variant(layout: Layout, op_name: str, func_code: int, params: dict[str, Any], variant: Variant) -> VariantPlan`
+  - `icsgen.protocols.modbus.variants.plan_variant(layout: Layout, op_name: str, func_code: int, params: dict[str, Any], variant: Variant, maxima: dict[str, int] | None = None) -> VariantPlan`
 
 **变体策略**：
 
 | 变体 | 请求 | 响应 |
 |---|---|---|
 | `normal` | 按 catalog 参数默认值填充 | 按布局生成合理的默认值 |
-| `boundary` | 把数值型参数取上界（如 quantity 用 catalog 的 maximum） | 同 normal |
+| `boundary` | 把数值型参数取上界（如 quantity 用 catalog 的 maximum）；数组参数逐元素取元素上界 | 同 normal |
 | `exception` | 请求同 normal | 异常响应：功能码 \| 0x80 + 异常码（默认 0x02 非法数据地址） |
-| `illegal_fc` | 功能码改为 `raw_function_code` | 异常响应，功能码为该非法值 \| 0x80 |
+| `illegal_fc` | 功能码就是 catalog 条目声明的非法功能码 | 异常响应：功能码 \| 0x80 + 异常码 0x01 非法功能码 |
 | `malformed` | 请求同 normal，但长度字段与实际内容不符 | 无响应 |
+
+> `illegal_fc` 变体的功能码不再由参数携带：catalog 条目 `modbus.illegal_function_code`
+> 的 `func_code` 本身就是保留值（99），参数里再放一个功能码会形成第二事实源。
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -1693,6 +2070,7 @@ def test_boundary_plan_uses_upper_bound():
         3,
         {"start_addr": 0, "quantity": 3},
         Variant.BOUNDARY,
+        maxima={"quantity": 125},
     )
     assert plan.request_values["quantity"] == 125
 
@@ -1704,17 +2082,20 @@ def test_exception_plan_marks_exception():
     assert plan.metadata["exception_code"] == 2
 
 
-def test_illegal_function_code_variant_uses_raw_code():
+def test_illegal_function_code_variant_marks_exception():
+    """非法功能码由 catalog 条目的 func_code 决定，响应是异常响应。"""
     layout = get_layout("fc01")
     plan = plan_variant(
         layout,
         "modbus.illegal_function_code",
         99,
-        {"raw_function_code": 43, "quantity": 1},
+        {"quantity": 1},
         Variant.ILLEGAL_FC,
     )
-    assert plan.func_code == 43
+    assert plan.func_code == 99
     assert plan.is_exception is True
+    assert plan.metadata["illegal_function_code"] == 99
+    assert plan.metadata["exception_code"] == 1
 
 
 def test_malformed_variant_has_no_response():
@@ -1737,6 +2118,37 @@ def test_response_byte_count_matches_value_count():
     plan = plan_variant(layout, "modbus.read_holding_registers", 3, {"quantity": 3}, Variant.NORMAL)
     assert plan.response_values["byte_count"] == 6
     assert len(plan.response_values["values"]) == 3
+
+
+def test_boundary_plan_pushes_array_elements_to_maximum():
+    """边界变体把数组参数的每个元素都顶到元素上界。"""
+    layout = get_layout("fc10")
+    plan = plan_variant(
+        layout,
+        "modbus.write_multiple_registers",
+        16,
+        {"quantity": 2, "values": [1, 2]},
+        Variant.BOUNDARY,
+        maxima={"values": 0xFFFF},
+    )
+    assert plan.request_values["values"] == [0xFFFF, 0xFFFF]
+
+
+def test_file_write_response_length_fields_are_consistent():
+    """FC15 响应的 byte_count 与 record_length 必须与记录数据自洽。"""
+    layout = get_layout("fc15")
+    plan = plan_variant(
+        layout,
+        "modbus.write_file_record",
+        21,
+        {"record_data": b"\x00\x01\x00\x02"},
+        Variant.NORMAL,
+    )
+    assert plan.request_values["record_length"] == 2
+    assert plan.request_values["byte_count"] == 11
+    assert plan.response_values["record_length"] == 2
+    assert plan.response_values["byte_count"] == 11
+    assert len(plan.response_values["record_data"]) == 4
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
@@ -1767,6 +2179,9 @@ from icsgen.spec.model import Variant
 #: 协议异常码：0x02 非法数据地址
 DEFAULT_EXCEPTION_CODE = 0x02
 
+#: 协议异常码：0x01 非法功能码
+ILLEGAL_FUNCTION_EXCEPTION_CODE = 0x01
+
 
 @dataclass(frozen=True)
 class VariantPlan:
@@ -1786,73 +2201,127 @@ def _default_for(f: Field) -> Any:
     return 0
 
 
-def _build_values(layout: Layout, params: dict[str, Any], boundary: bool) -> dict[str, Any]:
+def _element_count(f: Field, raw: int) -> int:
+    """把长度来源换算成元素个数。
+
+    ``len_from_request`` 给出的已经是元素个数；``count_from`` 给出的通常是
+    字节计数，要除以元素宽度（bytes 型宽度为 1，除法无影响）。
+    """
+    count = int(raw)
+    if f.len_from_request is None and not f.count_is_elements:
+        count = count // (2 if f.type == "uint16" else 1)
+    if f.count_adjust is not None:
+        count = f.count_adjust(count)
+    return count
+
+
+def _apply_length_fields(fields: tuple[Field, ...], values: dict[str, Any]) -> None:
+    """按数组长度算出长度字段（count_of），就地更新取值字典。"""
+    for f in fields:
+        if f.count_of is None:
+            continue
+        referenced = values.get(f.count_of)
+        if isinstance(referenced, (list, tuple, bytes, bytearray)):
+            count = len(referenced)
+        else:
+            count = int(referenced or 0)
+        if f.adjust is not None:
+            count = f.adjust(count)
+        values[f.name] = count
+
+
+def _build_values(layout: Layout, params: dict[str, Any]) -> dict[str, Any]:
     """按布局与参数填充取值字典。
 
-    boundary 为真时，数值型参数取 catalog 声明的上界（由调用方通过
-    ``maxima`` 传入），否则用参数值或字段默认值。
+    三遍处理：先填普通字段，再定出变长数组，最后由数组长度算出长度字段。
+    参数优先，其次是字段声明的缺省值，最后才是占位值；变长数组若既没有
+    参数也没有缺省值，按其长度来源补一份零填充数据。长度字段与数组内容
+    必须自洽，否则编码出来的帧与声明的规模对不上。
     """
     values: dict[str, Any] = {}
+
+    # 第一遍：普通字段
     for f in layout.request:
+        if f.count_of is not None or f.count_from is not None:
+            continue
         if f.name in params:
             values[f.name] = params[f.name]
         elif f.default is not None:
             values[f.name] = f.default
         else:
             values[f.name] = _default_for(f)
+
+    # 第二遍：变长数组
+    by_name = {f.name: f for f in layout.request}
+    for f in layout.request:
+        if f.count_from is None:
+            continue
+        if f.name in params:
+            values[f.name] = params[f.name]
+            continue
+        if f.default is not None:
+            values[f.name] = f.default
+            continue
+        source = by_name.get(f.count_from)
+        raw = values.get(f.count_from) if source is not None else None
+        if source is None or source.count_of is not None or raw is None:
+            # 长度字段本身由数组长度推出，无法反推数组
+            values[f.name] = _default_for(f)
+            continue
+        count = _element_count(f, raw)
+        values[f.name] = b"\x00" * count if f.type == "bytes" else [0] * count
+
+    # 第三遍：长度字段
+    _apply_length_fields(layout.request, values)
     return values
 
 
 def _apply_boundary(
     layout: Layout, params: dict[str, Any], maxima: dict[str, int]
 ) -> dict[str, Any]:
-    """把数值型参数替换为其上界。"""
-    values = _build_values(layout, params, boundary=False)
+    """把参数顶到上界：标量参数取其最大值，数组参数逐元素取元素最大值。"""
+    values = _build_values(layout, params)
     for name, maximum in maxima.items():
-        if name in values and isinstance(values[name], int):
+        current = values.get(name)
+        if isinstance(current, bool) or not isinstance(current, (int, list, tuple)):
+            continue
+        if isinstance(current, int):
             values[name] = maximum
+        else:
+            values[name] = [maximum] * len(current)
+    _apply_length_fields(layout.request, values)
     return values
 
 
 def _build_response(layout: Layout, request_values: dict[str, Any]) -> dict[str, Any]:
     """构造与请求规模匹配的响应取值。
 
-    必须两遍处理：先按 len_from_request 定出各变长数组的长度，再据此算出
-    count_of 的长度字段。顺序颠倒会让 FC03 响应的 byte_count 算成 0。
+    三遍处理：先定出各变长数组的长度，再填普通字段，最后由数组长度算出
+    长度字段。顺序颠倒会让 FC03 响应的 byte_count 算成 0。
     """
     values: dict[str, Any] = {}
 
-    # 第一遍：变长数组的长度
+    # 第一遍：变长数组
     for f in layout.response:
         if f.count_from is None:
             continue
-        width = 2 if f.type == "uint16" else 1
         source = f.len_from_request or f.count_from
         raw = request_values.get(source)
-        count = int(raw) if raw is not None else 0
-        if f.type == "bytes":
-            values[f.name] = b"\x00" * count
-        else:
-            values[f.name] = [0] * (count // width)
+        if raw is None:
+            # 长度来源不可得（它本身由数组长度推出），退回字段缺省值
+            values[f.name] = f.default if f.default is not None else _default_for(f)
+            continue
+        count = _element_count(f, raw)
+        values[f.name] = b"\x00" * count if f.type == "bytes" else [0] * count
 
-    # 第二遍：长度字段与普通字段
+    # 第二遍：普通字段
     for f in layout.response:
-        if f.count_from is not None:
+        if f.count_of is not None or f.count_from is not None:
             continue
-        if f.count_of is not None:
-            referenced = values.get(f.count_of)
-            if isinstance(referenced, (list, tuple, bytes, bytearray)):
-                count = len(referenced)
-            else:
-                count = int(referenced or 0)
-            if f.adjust is not None:
-                count = f.adjust(count)
-            values[f.name] = count
-            continue
-        if f.default is not None:
-            values[f.name] = f.default
-        else:
-            values[f.name] = _default_for(f)
+        values[f.name] = f.default if f.default is not None else _default_for(f)
+
+    # 第三遍：长度字段
+    _apply_length_fields(layout.response, values)
     return values
 
 
@@ -1871,18 +2340,21 @@ def plan_variant(
     maxima = maxima or {}
 
     if variant is Variant.ILLEGAL_FC:
-        raw_code = int(params.get("raw_function_code", func_code))
-        request_values = _build_values(layout, params, boundary=False)
+        # 非法功能码由 catalog 条目自身的 func_code 决定
+        request_values = _build_values(layout, params)
         return VariantPlan(
-            func_code=raw_code,
+            func_code=func_code,
             request_values=request_values,
             response_values={},
             is_exception=True,
-            metadata={"exception_code": DEFAULT_EXCEPTION_CODE, "illegal_function_code": raw_code},
+            metadata={
+                "exception_code": ILLEGAL_FUNCTION_EXCEPTION_CODE,
+                "illegal_function_code": func_code,
+            },
         )
 
     if variant is Variant.MALFORMED:
-        request_values = _build_values(layout, params, boundary=False)
+        request_values = _build_values(layout, params)
         return VariantPlan(
             func_code=func_code,
             request_values=request_values,
@@ -1894,7 +2366,7 @@ def plan_variant(
     if variant is Variant.BOUNDARY:
         request_values = _apply_boundary(layout, params, maxima)
     else:
-        request_values = _build_values(layout, params, boundary=False)
+        request_values = _build_values(layout, params)
 
     response_values = _build_response(layout, request_values)
 
@@ -1919,7 +2391,7 @@ def plan_variant(
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python3 -m pytest tests/test_modbus_variants.py -v`
-Expected: PASS —— 6 passed
+Expected: PASS —— 9 passed
 
 - [ ] **Step 5: 提交**
 
@@ -3170,7 +3642,7 @@ EOF
 - Produces:
   - `icsgen.protocols.base.ProtocolFrame`：`frozen dataclass`，字段 `payload: bytes`、`metadata: dict[str, Any] = {}`
   - `icsgen.protocols.base.BuildContext`：`frozen dataclass`，字段 `transaction_id: int = 0`、`unit_id: int = 0xFF`、`transport: str = "tcp"`、`seed: int = 0`
-  - `icsgen.protocols.base.OperationSpec`：`frozen dataclass`，字段 `name: str`、`summary: str`、`layout: str`、`tier: str`、`variants: tuple[str, ...]`、`params_schema: dict[str, Any]`
+  - `icsgen.protocols.base.OperationSpec`：`frozen dataclass`，字段 `name: str`、`summary: str`、`layout: str`、`variants: tuple[str, ...]`、`params_schema: dict[str, Any]`（无 `tier` 字段 —— tier 由变体推导）
   - `icsgen.protocols.base.ProtocolAdapter`：`Protocol`，字段 `name: str`、`operations: Mapping[str, OperationSpec]`，方法 `build(op: Operation, ctx: BuildContext) -> ProtocolFrame`
   - `icsgen.protocols.modbus.adapter.ModbusAdapter`：`__init__(self, catalog: Catalog)`；实现 `build`
   - `icsgen.protocols.modbus.adapter.load_modbus_adapter() -> ModbusAdapter`
@@ -3343,7 +3815,6 @@ class OperationSpec:
     name: str
     summary: str
     layout: str
-    tier: str
     variants: tuple[str, ...]
     params_schema: dict[str, Any]
 
@@ -3395,7 +3866,6 @@ class ModbusAdapter:
                 name=name,
                 summary=entry.summary,
                 layout=entry.layout,
-                tier=entry.tier,
                 variants=tuple(entry.variants),
                 params_schema=entry.params,
             )
@@ -3406,17 +3876,34 @@ class ModbusAdapter:
         """把一次操作构建成协议帧。"""
         entry: OperationEntry = self.catalog.get(op.op)
         layout = get_layout(entry.layout)
+        # 场景没给的参数用 catalog 声明的缺省值补齐
+        defaults = {
+            name: spec["default"]
+            for name, spec in entry.params.items()
+            if isinstance(spec, dict) and "default" in spec
+        }
+        # 边界变体的上界：标量参数取 maximum，数组参数取元素上界
         maxima = {
             name: int(spec["maximum"])
             for name, spec in entry.params.items()
             if isinstance(spec, dict) and "maximum" in spec
         }
+        maxima.update(
+            {
+                name: int(spec["items"]["maximum"])
+                for name, spec in entry.params.items()
+                if isinstance(spec, dict)
+                and spec.get("type") == "array"
+                and isinstance(spec.get("items"), dict)
+                and "maximum" in spec["items"]
+            }
+        )
         func_code = entry.func_code if entry.func_code is not None else 0
         plan = plan_variant(
             layout=layout,
             op_name=op.op,
             func_code=func_code,
-            params=op.params,
+            params={**defaults, **op.params},
             variant=op.variant,
             maxima=maxima,
         )
