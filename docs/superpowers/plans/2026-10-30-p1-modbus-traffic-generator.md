@@ -3465,6 +3465,7 @@ def test_write_dataset_writes_manifest(tmp_path):
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["dataset"] == "demo"
     assert manifest["counts"]["legit"] == 1
+    assert manifest["protocols"] == ["modbus"]
     assert manifest["artifacts"][0]["op"] == "modbus.read_holding_registers"
     assert manifest["artifacts"][0]["sha256"]
     assert manifest["artifacts"][0]["len"] == 2
@@ -3625,6 +3626,15 @@ def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _session_key(artifact: Artifact) -> str:
+    """会话键：tier/protocol_transport。
+
+    目录路径与 manifest 里的 pcap 索引都从这里派生，避免两处各写一遍
+    格式而悄悄漂移。
+    """
+    return f"{artifact.tier}/{artifact.protocol}_{artifact.transport}"
+
+
 class DatasetBuilder:
     """收集产物并写出分层数据集。"""
 
@@ -3652,7 +3662,7 @@ class DatasetBuilder:
             raise KeyError(f"未登记的产物 id：{artifact_id!r}")
         if not packets:
             raise ValueError(f"产物 {artifact_id!r} 至少要挂一个包")
-        key = f"{artifact.tier}/{artifact.protocol}_{artifact.transport}"
+        key = _session_key(artifact)
         session = self._packets.setdefault(key, [])
         for offset, packet in enumerate(packets):
             index = len(session)
@@ -3699,7 +3709,7 @@ def write_dataset(
     entries: list[dict[str, Any]] = []
 
     for artifact in artifacts:
-        tier_dir = root / artifact.tier / f"{artifact.protocol}_{artifact.transport}"
+        tier_dir = root / _session_key(artifact)
         frames_dir = tier_dir / "frames"
         write_raw(frames_dir, artifact.id, artifact.payload)
 
@@ -3741,6 +3751,7 @@ def write_dataset(
     manifest = {
         "dataset": name,
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "protocols": sorted({artifact.protocol for artifact in artifacts}),
         "counts": counts,
         "artifacts": entries,
     }
