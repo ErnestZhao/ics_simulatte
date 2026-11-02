@@ -95,6 +95,8 @@ def _align_arrays(layout: Layout, values: dict[str, Any]) -> None:
             continue
         raw = values.get(f.len_from_request)
         if raw is None:
+            # 计数标量缺失时数组长度无从谈起：靠布局的 default 兜底；若布局
+            # 也没给 default，数组长度无从对齐。
             continue
         count = _element_count(f, int(raw), from_request=True)
         values[f.name] = _fit_array(values.get(f.name), count, f.type)
@@ -108,8 +110,9 @@ def _array_length(
 ) -> int:
     """数组在边界变体下该有的长度。
 
-    有计数标量时以计数标量为准（帧里的计数必须与内容一致）；没有计数标量
-    的数组（如 FC15 的记录数据）取最大元素个数 ``max_counts``。
+    有计数标量时以计数标量为准（帧里的计数必须与内容一致），此时
+    ``max_counts`` 不参与计算；没有计数标量的数组（如 FC15 的记录数据）
+    取最大元素个数 ``max_counts``。
     """
     if f is not None and f.len_from_request is not None:
         raw = values.get(f.len_from_request)

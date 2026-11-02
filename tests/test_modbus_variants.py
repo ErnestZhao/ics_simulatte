@@ -232,6 +232,31 @@ def test_count_scalar_is_authoritative_over_array():
     assert plan.request_values["byte_count"] == 2
 
 
+def test_response_array_without_length_source_is_a_sequence():
+    """长度来源不可得的响应数组退回占位值，占位值同样是序列。"""
+    layout = get_layout("fc0c")
+    plan = plan_variant(layout, "modbus.get_comm_event_log", 12, {}, Variant.NORMAL)
+    assert plan.response_values["events"] == b"\x00"
+    assert plan.response_values["byte_count"] == 7
+
+
+def test_boundary_grows_fc17_write_values_to_max_count():
+    """FC17 的写入数组在边界变体下同样跟随计数标量。"""
+    layout = get_layout("fc17")
+    plan = plan_variant(
+        layout,
+        "modbus.read_write_multiple_registers",
+        23,
+        {"write_quantity": 1, "write_values": [1]},
+        Variant.BOUNDARY,
+        maxima={"write_quantity": 121, "write_values": 0xFFFF},
+        max_counts={"write_values": 121},
+    )
+    assert plan.request_values["write_quantity"] == 121
+    assert plan.request_values["write_values"] == [0xFFFF] * 121
+    assert plan.request_values["write_byte_count"] == 242
+
+
 def test_metadata_carries_operation_name():
     """取值方案的元数据带上操作名，帧才能溯源到操作类型。"""
     layout = get_layout("fc03")
