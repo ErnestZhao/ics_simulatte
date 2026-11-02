@@ -37,6 +37,7 @@ class CatalogModel(BaseModel):
     """catalog.yaml 的结构。"""
 
     protocol: str
+    transports: list[str] = Field(default_factory=lambda: ["tcp"])
     operations: list[OperationEntry]
 
 
@@ -46,6 +47,7 @@ class Catalog:
 
     protocol: str
     operations: dict[str, OperationEntry]
+    transports: tuple[str, ...] = ("tcp",)
 
     def get(self, name: str) -> OperationEntry:
         """按操作名取条目，不存在时抛 KeyError。"""
@@ -57,6 +59,15 @@ class Catalog:
     def count(self) -> int:
         """操作类型数量。"""
         return len(self.operations)
+
+    def coverage_count(self) -> int:
+        """覆盖条目数 = Σ(每个操作类型的变体数) × 传输数。
+
+        这是 §15 丰富度指标的度量口径：一条覆盖条目对应一个
+        (操作类型, 变体, 传输) 组合，即一条可生成的流量样本。
+        """
+        variants = sum(len(entry.variants) for entry in self.operations.values())
+        return variants * len(self.transports)
 
 
 def _check_params_schema(entry: OperationEntry, path: Path) -> None:
@@ -88,4 +99,8 @@ def load_catalog(path: Path) -> Catalog:
     operations = {entry.name: entry for entry in model.operations}
     if len(operations) != len(model.operations):
         raise ValueError(f"catalog {path} 中存在重复的操作名")
-    return Catalog(protocol=model.protocol, operations=operations)
+    return Catalog(
+        protocol=model.protocol,
+        operations=operations,
+        transports=tuple(model.transports),
+    )
