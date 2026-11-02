@@ -2255,7 +2255,7 @@ def test_response_array_without_length_source_is_a_sequence():
     assert plan.response_values["byte_count"] == 7
 
 
-def test_request_array_follows_quantity():
+def test_fc10_request_array_follows_quantity():
     """FC10 的寄存器数组长度跟随 quantity：计数标量与实际内容必须一致。"""
     layout = get_layout("fc10")
     plan = plan_variant(
@@ -2269,7 +2269,7 @@ def test_request_array_follows_quantity():
     assert plan.request_values["byte_count"] == 10
 
 
-def test_bit_write_request_array_follows_quantity():
+def test_fc0f_request_bitmap_follows_quantity():
     """FC0F 的线圈位图字节数是线圈数除以 8 向上取整。"""
     layout = get_layout("fc0f")
     plan = plan_variant(
@@ -2295,6 +2295,21 @@ def test_fc17_write_values_follows_write_quantity():
     )
     assert plan.request_values["write_values"] == [1, 0, 0]
     assert plan.request_values["write_byte_count"] == 6
+
+
+def test_count_scalar_is_authoritative_over_array():
+    """计数标量与数组矛盾时以计数标量为准：数组截断，不反过来改写计数标量。"""
+    layout = get_layout("fc10")
+    plan = plan_variant(
+        layout,
+        "modbus.write_multiple_registers",
+        16,
+        {"quantity": 1, "values": [1, 2, 3]},
+        Variant.NORMAL,
+    )
+    assert plan.request_values["quantity"] == 1
+    assert plan.request_values["values"] == [1]
+    assert plan.request_values["byte_count"] == 2
 
 
 def test_boundary_grows_array_to_max_count():
@@ -2329,6 +2344,23 @@ def test_boundary_grows_bytes_array_to_max_count():
     assert plan.request_values["quantity"] == 1968
     assert plan.request_values["values"] == b"\xff" * 246
     assert plan.request_values["byte_count"] == 246
+
+
+def test_boundary_grows_fc17_write_values_to_max_count():
+    """FC17 的写入数组在边界变体下同样跟随计数标量。"""
+    layout = get_layout("fc17")
+    plan = plan_variant(
+        layout,
+        "modbus.read_write_multiple_registers",
+        23,
+        {"write_quantity": 1, "write_values": [1]},
+        Variant.BOUNDARY,
+        maxima={"write_quantity": 121, "write_values": 0xFFFF},
+        max_counts={"write_values": 121},
+    )
+    assert plan.request_values["write_quantity"] == 121
+    assert plan.request_values["write_values"] == [0xFFFF] * 121
+    assert plan.request_values["write_byte_count"] == 242
 
 
 def test_fc14_response_record_data_follows_requested_length():
@@ -2717,7 +2749,7 @@ def plan_variant(
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python3 -m pytest tests/test_modbus_variants.py -v`
-Expected: PASS —— 19 passed
+Expected: PASS —— 21 passed
 
 - [ ] **Step 5: 提交**
 
@@ -2985,7 +3017,8 @@ EOF
 **Interfaces:**
 - Consumes: 无（依赖 Scapy）
 - Produces:
-  - `icsgen.transport.spec.TransportSpec`：`frozen dataclass`，字段 `kind: str = "tcp"`、`dport: int = 502`、`sport: int | None = None`、`src_ip: str = "192.168.1.10"`、`dst_ip: str = "192.168.1.20"`、`mac_src: str = "02:00:00:00:00:01"`、`mac_dst: str = "02:00:00:00:00:02"`、`vlan_id: int | None = None`
+  - `icsgen.transport.spec.TransportSpec`：`frozen dataclass`，字段 `kind: str = "tcp"`、`dport: int = 502`、`sport: int | None = None`、`src_ip: str = "192.168.1.10"`、`dst_ip: str = "192.168.1.20"`、`mac_src: str = "02:00:00:00:00:01"`、`mac_dst: str = "02:00:00:00:00:02"`、`vlan_id: int | None = None`；方法 `reversed() -> TransportSpec` —— 返回方向相反的传输配置（源/目的 IP 与 MAC 对调、端口对调），用于响应的反向链路封装
+  - `icsgen.transport.spec.DEFAULT_SOURCE_PORT = 40001` —— 未指定源端口时的起始端口（由 `TransportSpec.reversed()` 与链路封装共用）
   - `icsgen.transport.link.encapsulate(payload: bytes, transport: TransportSpec, *, seq: int = 0, ack: int = 0, flags: str = "PA") -> bytes` —— 返回完整链路字节
 
 - [ ] **Step 1: 写失败的测试**
@@ -3045,6 +3078,28 @@ def test_custom_ports_are_used():
     pkt = _parse(raw)
     assert pkt[TCP].dport == 1502
     assert pkt[TCP].sport == 40001
+
+
+def test_reversed_spec_swaps_endpoints():
+    """反向配置把源/目的对调：响应当由服务端发往客户端。"""
+    spec = TransportSpec(dport=502, sport=40001)
+    rev = spec.reversed()
+    assert rev.src_ip == spec.dst_ip
+    assert rev.dst_ip == spec.src_ip
+    assert rev.mac_src == spec.mac_dst
+    assert rev.mac_dst == spec.mac_src
+    assert rev.sport == spec.dport
+    assert rev.dport == 40001
+
+
+def test_reversed_spec_yields_opposite_direction_on_the_wire():
+    spec = TransportSpec()
+    request = _parse(encapsulate(b"\x01", spec))
+    response = _parse(encapsulate(b"\x02", spec.reversed()))
+    assert request[IP].src == response[IP].dst
+    assert request[IP].dst == response[IP].src
+    assert request[TCP].sport == response[TCP].dport
+    assert request[TCP].dport == response[TCP].sport
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
@@ -3063,7 +3118,10 @@ Expected: FAIL —— `ModuleNotFoundError: No module named 'icsgen.transport'`
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+
+#: 未指定源端口时的起始端口，后续按会话递增
+DEFAULT_SOURCE_PORT = 40001
 
 
 @dataclass(frozen=True)
@@ -3078,6 +3136,22 @@ class TransportSpec:
     mac_src: str = "02:00:00:00:00:01"
     mac_dst: str = "02:00:00:00:00:02"
     vlan_id: int | None = None
+
+    def reversed(self) -> "TransportSpec":
+        """返回方向相反的传输配置。
+
+        一次操作会产出请求与响应两帧，响应由服务端发往客户端，因此源/目的
+        的 IP、MAC 与端口都要对调。
+        """
+        return replace(
+            self,
+            src_ip=self.dst_ip,
+            dst_ip=self.src_ip,
+            mac_src=self.mac_dst,
+            mac_dst=self.mac_src,
+            sport=self.dport,
+            dport=self.sport if self.sport is not None else DEFAULT_SOURCE_PORT,
+        )
 ```
 
 创建 `icsgen/transport/link.py`：
@@ -3092,10 +3166,7 @@ from __future__ import annotations
 
 from scapy.all import Dot1Q, Ether, IP, TCP, UDP
 
-from .spec import TransportSpec
-
-#: 未指定源端口时的起始端口，后续按会话递增
-DEFAULT_SOURCE_PORT = 40001
+from .spec import DEFAULT_SOURCE_PORT, TransportSpec
 
 
 def encapsulate(
@@ -3134,7 +3205,7 @@ def encapsulate(
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python3 -m pytest tests/test_transport_link.py -v`
-Expected: PASS —— 6 passed
+Expected: PASS —— 8 passed
 
 - [ ] **Step 5: 提交**
 
@@ -3319,9 +3390,13 @@ EOF
 **Interfaces:**
 - Consumes: `icsgen.emit.raw.write_raw`（Task 8）、`icsgen.transport.pcap.write_pcap`（Task 8）
 - Produces:
-  - `icsgen.emit.dataset.Artifact`：`frozen dataclass`，字段 `id: str`、`protocol: str`、`transport: str`、`op: str`、`variant: str`、`tier: str`、`payload: bytes`、`metadata: dict[str, Any] = {}`、`parent_id: str | None = None`、`mutation: dict[str, Any] | None = None`
-  - `icsgen.emit.dataset.DatasetBuilder`：`__init__(self, name: str, root: Path)`；方法 `add(artifact: Artifact) -> None`、`add_linked_packet(artifact_id: str, packet: bytes) -> None`、`write() -> Path`
-  - `icsgen.emit.dataset.write_dataset(name: str, root: Path, artifacts: list[Artifact], packets: dict[str, list[bytes]]) -> Path`
+  - `icsgen.emit.dataset.Artifact`：`frozen dataclass`，字段 `id: str`、`protocol: str`、`transport: str`、`op: str`、`variant: str`、`tier: str`、`payload: bytes`、`response: bytes | None = None`、`metadata: dict[str, Any] = {}`、`parent_id: str | None = None`、`mutation: dict[str, Any] | None = None` —— 一次操作 = 一个 Artifact，请求与响应都挂在同一条记录上（spec §11.1）
+  - `icsgen.emit.dataset.DatasetBuilder`：`__init__(self, name: str, root: Path)`；方法 `add(artifact: Artifact) -> None`、`add_linked_packets(artifact_id: str, packets: list[bytes]) -> None`、`write() -> Path`
+  - `icsgen.emit.dataset.write_dataset(name: str, root: Path, artifacts: list[Artifact], packets: dict[str, list[bytes]], positions: dict[str, tuple[str, int]] | None = None, response_positions: dict[str, tuple[str, int]] | None = None) -> Path`
+
+**请求与响应**：一次操作产出一帧请求与一帧响应，二者在 pcap 里连续（spec §11.1「请求+响应连续」）。
+`add_linked_packets` 接受一组包：首个是请求（记为 `pcap_index`），次个是响应（记为 `pcap_resp_index`）。
+响应字节另存为 `<id>.resp.bin` / `<id>.resp.hex`，manifest 记 `resp_len` / `resp_sha256`。
 
 **数据集布局**（tier 与 transport 分目录，pcap 按 (tier, transport) 聚合）：
 
@@ -3330,7 +3405,9 @@ datasets/<name>/
 ├── manifest.json
 ├── legit/modbus_tcp/
 │   ├── session.pcap
-│   └── frames/<op>#<n>.bin|.hex
+│   └── frames/
+│       ├── <op>#<n>.bin|.hex        # 请求帧
+│       └── <op>#<n>.resp.bin|.hex   # 响应帧
 └── abnormal/modbus_tcp/...
 ```
 
@@ -3433,17 +3510,47 @@ def test_pcap_index_differs_within_one_session(tmp_path):
                 payload=bytes([index]),
             )
         )
-        builder.add_linked_packet(artifact_id, encapsulate(b"\x01", TransportSpec()))
+        builder.add_linked_packets(artifact_id, [encapsulate(b"\x01", TransportSpec())])
     root = builder.write()
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
     indexes = [entry["pcap_index"] for entry in manifest["artifacts"]]
     assert indexes == [0, 1, 2]
 
 
+def test_response_frame_is_written_and_indexed(tmp_path):
+    """响应帧另存为 <id>.resp.bin，并在 manifest 里记录它在会话中的位置。"""
+    builder = DatasetBuilder("demo", tmp_path / "ds")
+    builder.add(
+        Artifact(
+            id="modbus.read_holding_registers#001",
+            protocol="modbus",
+            transport="tcp",
+            op="modbus.read_holding_registers",
+            variant="normal",
+            tier="legit",
+            payload=b"\x01\x03",
+            response=b"\x01\x03\x06\x00",
+        )
+    )
+    builder.add_linked_packets(
+        "modbus.read_holding_registers#001",
+        [encapsulate(b"\x01\x03", TransportSpec()), encapsulate(b"\x01\x03\x06\x00", TransportSpec().reversed())],
+    )
+    root = builder.write()
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    entry = manifest["artifacts"][0]
+    assert entry["resp_len"] == 4
+    assert entry["resp_sha256"]
+    assert entry["pcap_index"] == 0
+    assert entry["pcap_resp_index"] == 1
+    frames = root / "legit" / "modbus_tcp" / "frames"
+    assert (frames / "modbus.read_holding_registers#001.resp.bin").read_bytes() == b"\x01\x03\x06\x00"
+
+
 def test_builder_collects_artifacts(tmp_path):
     builder = DatasetBuilder("demo", tmp_path / "ds")
     builder.add(_artifact())
-    builder.add_linked_packet("modbus.read_holding_registers#001", encapsulate(b"\x01", TransportSpec()))
+    builder.add_linked_packets("modbus.read_holding_registers#001", [encapsulate(b"\x01", TransportSpec())])
     path = builder.write()
     assert (path / "manifest.json").exists()
 ```
@@ -3479,7 +3586,11 @@ from .raw import write_raw
 
 @dataclass(frozen=True)
 class Artifact:
-    """一条产物记录。"""
+    """一条产物记录。
+
+    一次操作 = 一个 Artifact：请求与响应都挂在同一条记录上，
+    response 为 None 表示这次操作不应有响应（如畸形帧）。
+    """
 
     id: str
     protocol: str
@@ -3488,6 +3599,7 @@ class Artifact:
     variant: str
     tier: str
     payload: bytes
+    response: bytes | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     parent_id: str | None = None
     mutation: dict[str, Any] | None = None
@@ -3506,28 +3618,44 @@ class DatasetBuilder:
         self.artifacts: list[Artifact] = []
         self._packets: dict[str, list[bytes]] = {}
         self._positions: dict[str, tuple[str, int]] = {}
+        self._response_positions: dict[str, tuple[str, int]] = {}
 
     def add(self, artifact: Artifact) -> None:
         """登记一条产物。"""
         self.artifacts.append(artifact)
 
-    def add_linked_packet(self, artifact_id: str, packet: bytes) -> None:
+    def add_linked_packets(self, artifact_id: str, packets: list[bytes]) -> None:
         """把链路字节挂到它所属的 (tier, transport) 会话中。
 
         artifact_id 形如 ``<op>#<n>``，需与已登记的产物 id 对应。
-        挂载时即记录该产物在会话中的包序号，供 manifest 索引。
+        一次操作在会话里是连续的请求与响应，因此这里接受一组包：首个是
+        请求，次个是响应。挂载时即记录各自在会话中的包序号，供 manifest 索引。
         """
         artifact = next((a for a in self.artifacts if a.id == artifact_id), None)
         if artifact is None:
             raise KeyError(f"未登记的产物 id：{artifact_id!r}")
+        if not packets:
+            raise ValueError(f"产物 {artifact_id!r} 至少要挂一个包")
         key = f"{artifact.tier}/{artifact.protocol}_{artifact.transport}"
         session = self._packets.setdefault(key, [])
-        self._positions[artifact_id] = (key, len(session))
-        session.append(packet)
+        for offset, packet in enumerate(packets):
+            index = len(session)
+            session.append(packet)
+            if offset == 0:
+                self._positions[artifact_id] = (key, index)
+            elif offset == 1:
+                self._response_positions[artifact_id] = (key, index)
 
     def write(self) -> Path:
         """写出数据集目录，返回根路径。"""
-        return write_dataset(self.name, self.root, self.artifacts, self._packets, self._positions)
+        return write_dataset(
+            self.name,
+            self.root,
+            self.artifacts,
+            self._packets,
+            self._positions,
+            self._response_positions,
+        )
 
 
 def write_dataset(
@@ -3536,14 +3664,17 @@ def write_dataset(
     artifacts: list[Artifact],
     packets: dict[str, list[bytes]],
     positions: dict[str, tuple[str, int]] | None = None,
+    response_positions: dict[str, tuple[str, int]] | None = None,
 ) -> Path:
     """写出分层数据集与 manifest.json。
 
-    positions 为「产物 id → (会话键, 包序号)」，由 DatasetBuilder 在挂载
-    链路字节时记录，用于在 manifest 中精确定位每条产物所在的包。
+    positions 为「产物 id → (会话键, 包序号)」，response_positions 为响应
+    帧的同类记录，由 DatasetBuilder 在挂载链路字节时记录，用于在 manifest
+    中精确定位每条产物所在的请求包与响应包。
     """
     root.mkdir(parents=True, exist_ok=True)
     positions = positions or {}
+    response_positions = response_positions or {}
 
     counts: dict[str, int] = {}
     entries: list[dict[str, Any]] = []
@@ -3570,6 +3701,14 @@ def write_dataset(
             key, index = position
             entry["pcap_file"] = f"{key}/session.pcap"
             entry["pcap_index"] = index
+        if artifact.response is not None:
+            write_raw(frames_dir, f"{artifact.id}.resp", artifact.response)
+            entry["resp_len"] = len(artifact.response)
+            entry["resp_sha256"] = _sha256(artifact.response)
+        response_position = response_positions.get(artifact.id)
+        if response_position is not None:
+            _, index = response_position
+            entry["pcap_resp_index"] = index
         if artifact.parent_id is not None:
             entry["parent_id"] = artifact.parent_id
         if artifact.mutation is not None:
@@ -3595,7 +3734,7 @@ def write_dataset(
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python3 -m pytest tests/test_emit_dataset.py -v`
-Expected: PASS —— 6 passed
+Expected: PASS —— 7 passed
 
 - [ ] **Step 5: 提交**
 
@@ -3962,6 +4101,7 @@ EOF
 - Create: `icsgen/protocols/modbus/adapter.py`
 - Create: `icsgen/generator.py`
 - Create: `tests/test_generator.py`
+- Modify: `icsgen/spec/catalog.py`（修正 `OperationEntry.params` 的 docstring —— catalog 的 `default` 是参数的权威缺省值，场景显式给出的值优先；布局里 `Field.default` 是更靠后的兜底）
 
 **Interfaces:**
 - Consumes: `icsgen.protocols.modbus.layouts.get_layout`（Task 4）、`icsgen.protocols.modbus.variants.plan_variant`（Task 5）、`icsgen.protocols.modbus.framing`（Task 6）、`icsgen.transport.link.encapsulate`（Task 7）、`icsgen.emit.dataset.Artifact`/`DatasetBuilder`（Task 9）
@@ -3969,8 +4109,8 @@ EOF
   - `icsgen.protocols.base.ProtocolFrame`：`frozen dataclass`，字段 `payload: bytes`、`metadata: dict[str, Any] = {}`
   - `icsgen.protocols.base.BuildContext`：`frozen dataclass`，字段 `transaction_id: int = 0`、`unit_id: int = 0xFF`、`transport: str = "tcp"`、`seed: int = 0`
   - `icsgen.protocols.base.OperationSpec`：`frozen dataclass`，字段 `name: str`、`summary: str`、`layout: str`、`variants: tuple[str, ...]`、`params_schema: dict[str, Any]`（无 `tier` 字段 —— tier 由变体推导）
-  - `icsgen.protocols.base.ProtocolAdapter`：`Protocol`，字段 `name: str`、`operations: Mapping[str, OperationSpec]`，方法 `build(op: Operation, ctx: BuildContext) -> ProtocolFrame`
-  - `icsgen.protocols.modbus.adapter.ModbusAdapter`：`__init__(self, catalog: Catalog)`；实现 `build`
+  - `icsgen.protocols.base.ProtocolAdapter`：`Protocol`，字段 `name: str`、`operations: Mapping[str, OperationSpec]`，方法 `build(op: Operation, ctx: BuildContext) -> ProtocolFrame`、`build_response(op: Operation, ctx: BuildContext) -> ProtocolFrame | None`
+  - `icsgen.protocols.modbus.adapter.ModbusAdapter`：`__init__(self, catalog: Catalog)`；实现 `build` 与 `build_response`
   - `icsgen.protocols.modbus.adapter.load_modbus_adapter() -> ModbusAdapter`
   - `icsgen.generator.build_dataset(scenario: Scenario, adapter: ProtocolAdapter, root: Path, name: str) -> Path`
 
@@ -4090,6 +4230,71 @@ def test_build_dataset_separates_abnormal_tier(tmp_path):
     assert manifest["counts"]["legit"] == 1
     assert manifest["counts"]["abnormal"] == 1
     assert (root / "abnormal" / "modbus_tcp" / "frames").is_dir()
+
+
+def test_build_response_returns_normal_response():
+    """正常变体的响应是 FC03 的正常响应：byte_count + 寄存器数据。"""
+    from icsgen.protocols.base import BuildContext
+    from icsgen.spec.model import Operation
+
+    adapter = load_modbus_adapter()
+    op = Operation(op="modbus.read_holding_registers", params={"start_addr": 0, "quantity": 3})
+    frame = adapter.build_response(op, BuildContext(transaction_id=1, unit_id=0xFF))
+    assert frame is not None
+    assert frame.payload[:7] == b"\x00\x01\x00\x00\x00\x09\xff"
+    assert frame.payload[7] == 0x03
+    assert frame.payload[8] == 6
+
+
+def test_build_response_returns_exception_response():
+    """异常变体的响应是 FC|0x80 + 异常码。"""
+    from icsgen.protocols.base import BuildContext
+    from icsgen.spec.model import Operation
+
+    adapter = load_modbus_adapter()
+    op = Operation(
+        op="modbus.read_holding_registers",
+        params={"quantity": 3},
+        variant=Variant.EXCEPTION,
+    )
+    frame = adapter.build_response(op, BuildContext(transaction_id=1, unit_id=0xFF))
+    assert frame is not None
+    assert frame.payload[7] == 0x83
+    assert frame.payload[8] == 0x02
+
+
+def test_malformed_variant_has_no_response():
+    """畸形帧没有可解析的响应。"""
+    from icsgen.protocols.base import BuildContext
+    from icsgen.spec.model import Operation
+
+    adapter = load_modbus_adapter()
+    op = Operation(
+        op="modbus.read_holding_registers",
+        params={"quantity": 3},
+        variant=Variant.MALFORMED,
+    )
+    assert adapter.build_response(op, BuildContext()) is None
+
+
+def test_dataset_pairs_request_and_response(tmp_path):
+    """一次操作在 pcap 里是连续的请求与响应两包。"""
+    from icsgen.spec.model import Operation
+
+    adapter = load_modbus_adapter()
+    scenario = Scenario(
+        name="demo",
+        transport={"kind": "tcp"},
+        operations=(Operation(op="modbus.read_holding_registers", params={"quantity": 3}),),
+    )
+    root = build_dataset(scenario, adapter, tmp_path / "ds", name="demo")
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    entry = manifest["artifacts"][0]
+    assert entry["pcap_index"] == 0
+    assert entry["pcap_resp_index"] == 1
+    assert entry["resp_len"] > 0
+    frames = root / "legit" / "modbus_tcp" / "frames"
+    assert (frames / f"{entry['id']}.resp.bin").exists()
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
@@ -4152,6 +4357,8 @@ class ProtocolAdapter(Protocol):
     operations: Mapping[str, OperationSpec]
 
     def build(self, op: Operation, ctx: BuildContext) -> ProtocolFrame: ...
+
+    def build_response(self, op: Operation, ctx: BuildContext) -> ProtocolFrame | None: ...
 ```
 
 创建 `icsgen/protocols/modbus/adapter.py`：
@@ -4161,6 +4368,7 @@ class ProtocolAdapter(Protocol):
 
 按 catalog 声明的布局与变体语义把一次操作变成协议帧：
 TCP 用 MBAP 组帧，RTU 用地址 + PDU + CRC 组帧。
+一次操作产出请求与响应两帧，响应由服务端发往客户端。
 """
 
 from __future__ import annotations
@@ -4169,12 +4377,13 @@ from pathlib import Path
 from typing import Any
 
 from ...codec.encoder import encode
+from ...codec.fields import Layout
 from ...spec.catalog import Catalog, OperationEntry, load_catalog
 from ...spec.model import Operation, Variant
 from ..base import BuildContext, OperationSpec, ProtocolFrame
 from . import framing
 from .layouts import get_layout
-from .variants import plan_variant
+from .variants import DEFAULT_EXCEPTION_CODE, VariantPlan, plan_variant
 
 #: catalog 文件位置
 CATALOG_PATH = Path(__file__).resolve().parent / "catalog.yaml"
@@ -4199,7 +4408,48 @@ class ModbusAdapter:
         }
 
     def build(self, op: Operation, ctx: BuildContext) -> ProtocolFrame:
-        """把一次操作构建成协议帧。"""
+        """把一次操作构建成请求帧。"""
+        layout, plan = self._plan(op)
+        request_pdu = framing.build_pdu(
+            plan.func_code,
+            encode(layout.request, plan.request_values),
+        )
+        metadata: dict[str, Any] = {
+            "fc": plan.func_code,
+            "unit_id": ctx.unit_id,
+            "transport": ctx.transport,
+            "is_exception": plan.is_exception,
+        }
+        metadata.update(plan.metadata)
+
+        return ProtocolFrame(payload=self._frame(request_pdu, ctx), metadata=metadata)
+
+    def build_response(self, op: Operation, ctx: BuildContext) -> ProtocolFrame | None:
+        """把一次操作构建成响应帧。
+
+        异常变体按 Modbus 规范回异常响应（功能码 | 0x80 + 异常码）；
+        畸形帧没有可解析的响应，返回 None。
+        """
+        layout, plan = self._plan(op)
+        if op.variant is Variant.MALFORMED:
+            return None
+        if plan.is_exception:
+            code = int(plan.metadata.get("exception_code", DEFAULT_EXCEPTION_CODE))
+            response_pdu = bytes([plan.func_code | 0x80, code])
+        else:
+            response_pdu = framing.build_pdu(
+                plan.func_code,
+                encode(layout.response, plan.response_values),
+            )
+        metadata: dict[str, Any] = {
+            "fc": plan.func_code,
+            "unit_id": ctx.unit_id,
+            "transport": ctx.transport,
+        }
+        return ProtocolFrame(payload=self._frame(response_pdu, ctx), metadata=metadata)
+
+    def _plan(self, op: Operation) -> tuple[Layout, VariantPlan]:
+        """解析一次操作：catalog 缺省值 + 场景参数 → 布局与取值方案。"""
         entry: OperationEntry = self.catalog.get(op.op)
         layout = get_layout(entry.layout)
         # 场景没给的参数用 catalog 声明的缺省值补齐
@@ -4243,25 +4493,14 @@ class ModbusAdapter:
             maxima=maxima,
             max_counts=max_counts,
         )
+        return layout, plan
 
-        request_pdu = framing.build_pdu(
-            plan.func_code,
-            encode(layout.request, plan.request_values),
-        )
-        metadata: dict[str, Any] = {
-            "fc": plan.func_code,
-            "unit_id": ctx.unit_id,
-            "transport": ctx.transport,
-            "is_exception": plan.is_exception,
-        }
-        metadata.update(plan.metadata)
-
+    @staticmethod
+    def _frame(pdu: bytes, ctx: BuildContext) -> bytes:
+        """按传输方式把 PDU 组成完整帧。"""
         if ctx.transport == "rtu":
-            frame = framing.build_rtu(ctx.unit_id, request_pdu)
-        else:
-            frame = framing.build_mbap(ctx.transaction_id, ctx.unit_id, request_pdu)
-
-        return ProtocolFrame(payload=frame, metadata=metadata)
+            return framing.build_rtu(ctx.unit_id, pdu)
+        return framing.build_mbap(ctx.transaction_id, ctx.unit_id, pdu)
 
 
 def load_modbus_adapter() -> ModbusAdapter:
@@ -4269,12 +4508,30 @@ def load_modbus_adapter() -> ModbusAdapter:
     return ModbusAdapter(load_catalog(CATALOG_PATH))
 ```
 
+修改 `icsgen/spec/catalog.py` 中 `OperationEntry` 的 docstring（只改注释，不改行为）：
+
+```python
+class OperationEntry(BaseModel):
+    """catalog 中的一个操作类型条目。
+
+    params 是「参数名 -> 该参数的 JSON Schema 片段」的映射；其中的 default
+    键是该参数的权威缺省值 —— 适配器在场景未显式给出该参数时用它填充，
+    场景显式给出的值优先。字段布局里的 Field.default 是更靠后的兜底
+    （构造响应时请求参数不可得的情况）。
+
+    本条目不声明 tier：语义层由变体唯一决定（icsgen.spec.model.VARIANT_TIER），
+    catalog 再声明一个 tier 会成为第二事实源，且对同时含合法变体与异常变体的
+    操作类型必然自相矛盾。
+    """
+```
+
 创建 `icsgen/generator.py`：
 
 ```python
 """生成流水线：把场景变成分层数据集。
 
-流程：场景 → 逐条操作构建协议帧 → 封装链路 → 登记为产物 → 写盘。
+流程：场景 → 逐条操作构建请求帧与响应帧 → 封装链路 → 登记为产物 → 写盘。
+请求与响应连续进入同一会话的 pcap，保持会话内可配对。
 """
 
 from __future__ import annotations
@@ -4312,6 +4569,7 @@ def build_dataset(
             seed=index,
         )
         frame = adapter.build(op, ctx)
+        response_frame = adapter.build_response(op, ctx) if op.expect_response else None
         artifact = Artifact(
             id=f"{op.op}#{index + 1:03d}",
             protocol=adapter.name,
@@ -4320,13 +4578,23 @@ def build_dataset(
             variant=op.variant.value,
             tier=op.tier.value if op.tier is not None else "legit",
             payload=frame.payload,
+            response=response_frame.payload if response_frame is not None else None,
             metadata=frame.metadata,
         )
         builder.add(artifact)
-        builder.add_linked_packet(
-            artifact.id,
-            encapsulate(frame.payload, spec, seq=index * 10, ack=index * 10),
-        )
+        # 请求与响应连续进入同一会话：响应由服务端发回，链路方向相反
+        seq = index * 10
+        packets = [encapsulate(frame.payload, spec, seq=seq, ack=seq)]
+        if response_frame is not None:
+            packets.append(
+                encapsulate(
+                    response_frame.payload,
+                    spec.reversed(),
+                    seq=seq + len(frame.payload),
+                    ack=seq + len(frame.payload),
+                )
+            )
+        builder.add_linked_packets(artifact.id, packets)
 
     return builder.write()
 ```
@@ -4334,17 +4602,18 @@ def build_dataset(
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python3 -m pytest tests/test_generator.py -v`
-Expected: PASS —— 6 passed
+Expected: PASS —— 10 passed
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add icsgen/protocols/base.py icsgen/protocols/modbus/adapter.py icsgen/generator.py tests/test_generator.py
+git add icsgen/protocols/base.py icsgen/protocols/modbus/adapter.py icsgen/generator.py icsgen/spec/catalog.py tests/test_generator.py
 git commit -m "$(cat <<'EOF'
 feat: Modbus 适配器与生成流水线
 
 适配器按 catalog 布局与变体语义构建协议帧（TCP MBAP / RTU CRC），
-流水线把场景转成分层数据集并写出链路包与 manifest。
+一次操作同时产出请求帧与响应帧（异常变体回 FC|0x80 + 异常码），
+流水线把场景转成分层数据集并写出成对的链路包与 manifest。
 
 Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
 EOF
@@ -4942,7 +5211,7 @@ EOF
 import json
 from pathlib import Path
 
-from scapy.all import rdpcap
+from scapy.all import IP, rdpcap
 
 from icsgen.generator import build_dataset
 from icsgen.protocols.modbus.adapter import load_modbus_adapter
@@ -4995,6 +5264,25 @@ def test_generated_pcap_is_parseable(tmp_path):
     assert pcap.exists()
     packets = rdpcap(str(pcap))
     assert len(packets) >= 2
+    # 请求与响应方向相反：响应由服务端发回客户端
+    assert packets[0][IP].src == packets[1][IP].dst
+    assert packets[0][IP].dst == packets[1][IP].src
+
+
+def test_session_pairs_requests_with_responses(tmp_path):
+    """一次操作在会话里是连续的请求与响应两包，响应帧也单独落盘。"""
+    catalog = load_catalog(CATALOG_PATH)
+    scenario = load_scenario(SCENARIO_PATH, catalog)
+    adapter = load_modbus_adapter()
+    root = build_dataset(scenario, adapter, tmp_path / "ds", name=scenario.name)
+
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    # 示例场景里没有畸形帧，每条操作都有响应
+    for entry in manifest["artifacts"]:
+        assert entry["pcap_resp_index"] == entry["pcap_index"] + 1
+        assert entry["resp_len"] > 0
+        frames = root / entry["tier"] / f"{entry['protocol']}_{entry['transport']}" / "frames"
+        assert (frames / f"{entry['id']}.resp.bin").exists()
 
 
 def test_operation_type_count_meets_floor():
@@ -5084,14 +5372,16 @@ datasets/demo/
 ├── manifest.json              # 每条产物的 sha256、长度、语义元数据与 pcap 位置
 ├── legit/modbus_tcp/
 │   ├── session.pcap           # 该层下的完整会话，可直接用 Wireshark 打开
-│   └── frames/<op>#<n>.bin   # 纯协议帧（不含 IP/TCP 头）
+│   └── frames/<op>#<n>.bin   # 请求帧（纯协议帧，不含 IP/TCP 头）
 │   └── frames/<op>#<n>.hex   # 同上，空格分隔十六进制
+│   └── frames/<op>#<n>.resp.bin  # 响应帧
 ├── abnormal/modbus_tcp/...
 └── mutated/modbus_tcp/...     # 带 parent_id 与 mutation 溯源
 ```
 
 - **`.bin` 是纯协议帧**，不含 IP/TCP 头，便于单元测试逐字节断言。
-- **`.pcap` 是完整链路帧**，保留会话连贯性，便于人工分析与规则引擎回放。
+- **`.pcap` 是完整链路帧**，请求与响应成对连续，保留会话连贯性，便于人工分析与规则引擎回放。
+- **一次操作 = 一个 Artifact**：请求与响应同属一条记录，manifest 记 `pcap_index` 与 `pcap_resp_index`。
 - **`legit` / `abnormal` / `mutated` 三层互不污染**，manifest 记录每条产物的 tier。
 
 ## 语义层与变体
@@ -5164,7 +5454,7 @@ EOF
 | §8 catalog 与变体 | Task 3、Task 4、Task 5 |
 | §9 场景格式 | Task 3 |
 | §10 传输封装 | Task 7 |
-| §11 产出层 | Task 8、Task 9、Task 11 |
+| §11 产出层 | Task 8、Task 9、Task 11（请求+响应连续：Task 7 反向链路、Task 9 `Artifact.response`、Task 11 `build_response`） |
 | §12 变异引擎 | Task 10 |
 | §13 PLC 服务端 | Task 13 |
 | §14 CLI | Task 12 |
@@ -5173,13 +5463,15 @@ EOF
 | §17 依赖 | Task 1（pyproject.toml） |
 | §18 风险缓解 | Task 7（校验和由 Scapy 填充）、Task 10（变异不改原数据） |
 
-**跨任务接口一致性**：本计划中 `Operation.tier` 为 `Tier | None`（Task 1 定义，Task 3 透传，Task 11 用 `op.tier.value`）；`Artifact.tier` 为 `str`（Task 9 定义，Task 11 传入 `op.tier.value`）；`plan_variant` 返回 `VariantPlan`（Task 5 定义，Task 11 调用）；`build_dataset(scenario, adapter, root, name)` 的参数顺序在 Task 11 定义，Task 12 与 Task 14 调用一致。
+**跨任务接口一致性**：本计划中 `Operation.tier` 为 `Tier | None`（Task 1 定义，Task 3 透传，Task 11 用 `op.tier.value`）；`Artifact.tier` 为 `str`（Task 9 定义，Task 11 传入 `op.tier.value`）；`plan_variant` 返回 `VariantPlan`（Task 5 定义，Task 11 调用）；`build_dataset(scenario, adapter, root, name)` 的参数顺序在 Task 11 定义，Task 12 与 Task 14 调用一致。请求与响应路径：`TransportSpec.reversed()`（Task 7 定义，Task 11 调用）→ `Artifact.response` 与 `DatasetBuilder.add_linked_packets`（Task 9 定义，Task 11 调用）→ `ProtocolAdapter.build_response`（Task 11 定义，Task 14 端到端断言）。
 
 **编写过程中发现并已修正的问题**：
 
 1. `duplicate_replay` 与 `interleave_frames` 需要成对输入，单帧时返回 `None`；原测试断言"每条规则都产生变异"对这两条不成立 —— 已在 Task 10 的测试中把它们排除并单独断言空结果。
 2. `ModbusTcpServer` 没有 `start()` 方法，只有 `serve_forever()` 与 `shutdown()`；原先用线程包裹 `StartTcpServer` 的写法停止不可靠 —— 已改为 `ModbusTcpServer` + `shutdown()`。
 3. 响应数组的长度无法从请求字段直接推导（FC03 响应的 values 会算成 0 个元素）—— 已给 `Field` 增加 `len_from_request` 声明，并把 `_build_response` 改为两遍处理（先数组、后长度字段）。
+4. **请求内数组的长度必须跟随同帧的计数标量** —— FC0F/FC10/FC17 的请求数组与长度字段互为环状引用，唯一不自相矛盾的依据是同帧的计数标量（`quantity` / `write_quantity`）。布局用 `len_from_request` 声明这条协议结构关系，变体层把数组对齐到计数标量推出的长度（不足补零、超出截断）。**字节布局不变** —— 编解码内核不读这两个字段。
+5. **计划原本只产请求帧，没有响应帧** —— 与 spec §7「异常响应作为独立 variant 生成」、§11.1「请求+响应连续」、§16「验证请求-响应成对」矛盾，且 Task 9 的文档字符串已宣称「保持会话内请求/响应连续」。已补上响应路径：Task 7 的 `TransportSpec.reversed()`、Task 9 的 `Artifact.response` 与 `pcap_resp_index`、Task 11 的 `ModbusAdapter.build_response`。**一次操作仍 = 一个 Artifact**，覆盖度计数不变。
 
 **遗留说明**：`duplicate_replay` 与 `interleave_frames` 在 P1 保持"单帧不适用"，成对帧的变异留待 P2 起引入多帧场景后实现；届时需同步更新 Task 10 的测试与 `icsgen.mutate` 的输入接口（当前只接受单帧字节）。
 
