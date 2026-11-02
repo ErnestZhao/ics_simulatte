@@ -113,17 +113,17 @@ def test_file_write_response_length_fields_are_consistent():
     assert len(plan.response_values["record_data"]) == 4
 
 
-def test_circular_array_placeholder_is_a_sequence():
-    """数组的长度来源是长度字段（环状引用）时，占位值必须是序列而不是标量。
+def test_circular_array_is_never_a_scalar():
+    """数组的取值必须是序列而不是标量。
 
     FC17 的 write_values 长度由 write_byte_count 推出，而 write_byte_count 又由
-    write_values 推出 —— 没有参数时无法反推，只能给一个最小长度的占位数组。
-    给标量会让编码器在遍历数组时抛裸 TypeError。
+    write_values 推出 —— 环状引用下无法从长度字段反推数组，只能由计数标量
+    write_quantity 推出。给标量会让编码器在遍历数组时抛裸 TypeError。
     """
     layout = get_layout("fc17")
     plan = plan_variant(layout, "modbus.read_write_multiple_registers", 23, {}, Variant.NORMAL)
     assert plan.request_values["write_values"] == [0]
-    assert encode(layout.request, plan.request_values) == b"\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00"
+    assert encode(layout.request, plan.request_values) == b"\x00\x00\x00\x00\x00\x00\x00\x01\x02\x00\x00"
 
 
 def test_boundary_grows_array_to_max_count():
@@ -173,6 +173,63 @@ def test_fc14_response_record_data_follows_requested_length():
     assert plan.response_values["record_data"] == b"\x00\x00\x00\x00"
     assert plan.response_values["file_response_length"] == 5
     assert plan.response_values["byte_count"] == 6
+
+
+def test_fc10_request_array_follows_quantity():
+    """FC10 的寄存器数组长度跟随 quantity：计数标量与实际内容必须一致。"""
+    layout = get_layout("fc10")
+    plan = plan_variant(
+        layout,
+        "modbus.write_multiple_registers",
+        16,
+        {"quantity": 5, "values": [1, 1]},
+        Variant.NORMAL,
+    )
+    assert plan.request_values["values"] == [1, 1, 0, 0, 0]
+    assert plan.request_values["byte_count"] == 10
+
+
+def test_fc0f_request_bitmap_follows_quantity():
+    """FC0F 的线圈位图字节数是线圈数除以 8 向上取整。"""
+    layout = get_layout("fc0f")
+    plan = plan_variant(
+        layout,
+        "modbus.write_multiple_coils",
+        15,
+        {"quantity": 16, "values": b"\xff"},
+        Variant.NORMAL,
+    )
+    assert plan.request_values["values"] == b"\xff\x00"
+    assert plan.request_values["byte_count"] == 2
+
+
+def test_fc17_write_values_follows_write_quantity():
+    """FC17 的写入数组长度跟随 write_quantity。"""
+    layout = get_layout("fc17")
+    plan = plan_variant(
+        layout,
+        "modbus.read_write_multiple_registers",
+        23,
+        {"write_quantity": 3, "write_values": [1]},
+        Variant.NORMAL,
+    )
+    assert plan.request_values["write_values"] == [1, 0, 0]
+    assert plan.request_values["write_byte_count"] == 6
+
+
+def test_count_scalar_is_authoritative_over_array():
+    """计数标量与数组矛盾时以计数标量为准：数组截断，不反过来改写计数标量。"""
+    layout = get_layout("fc10")
+    plan = plan_variant(
+        layout,
+        "modbus.write_multiple_registers",
+        16,
+        {"quantity": 1, "values": [1, 2, 3]},
+        Variant.NORMAL,
+    )
+    assert plan.request_values["quantity"] == 1
+    assert plan.request_values["values"] == [1]
+    assert plan.request_values["byte_count"] == 2
 
 
 def test_metadata_carries_operation_name():

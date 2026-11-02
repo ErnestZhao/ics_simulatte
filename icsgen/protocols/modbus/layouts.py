@@ -139,18 +139,31 @@ LAYOUTS: dict[str, Layout] = {
     "fc0f": Layout(
         request=(
             Field("start_addr", "uint16"),
-            Field("quantity", "uint16"),
+            # quantity 是线圈数，位图的字节数由它推出（÷8 向上取整）
+            Field("quantity", "uint16", default=8),
             Field("byte_count", "uint8", count_of="values"),
-            Field("values", "bytes", count_from="byte_count"),
+            Field(
+                "values",
+                "bytes",
+                count_from="byte_count",
+                len_from_request="quantity",
+                len_adjust=lambda n: (n + 7) // 8,
+            ),
         ),
         response=(Field("start_addr", "uint16"), Field("quantity", "uint16")),
     ),
     "fc10": Layout(
         request=(
             Field("start_addr", "uint16"),
-            Field("quantity", "uint16"),
+            # quantity 是寄存器数，values 的元素个数与它相同
+            Field("quantity", "uint16", default=2),
             Field("byte_count", "uint8", count_of="values", adjust=lambda n: n * 2),
-            Field("values", "uint16", count_from="byte_count"),
+            Field(
+                "values",
+                "uint16",
+                count_from="byte_count",
+                len_from_request="quantity",
+            ),
         ),
         response=(Field("start_addr", "uint16"), Field("quantity", "uint16")),
     ),
@@ -193,9 +206,15 @@ LAYOUTS: dict[str, Layout] = {
             Field("read_addr", "uint16"),
             Field("read_quantity", "uint16"),
             Field("write_addr", "uint16"),
-            Field("write_quantity", "uint16"),
+            # write_quantity 是写入寄存器数，write_values 的元素个数与它相同
+            Field("write_quantity", "uint16", default=1),
             Field("write_byte_count", "uint8", count_of="write_values", adjust=lambda n: n * 2),
-            Field("write_values", "uint16", count_from="write_byte_count"),
+            Field(
+                "write_values",
+                "uint16",
+                count_from="write_byte_count",
+                len_from_request="write_quantity",
+            ),
         ),
         response=(
             Field("byte_count", "uint8", count_of="values", adjust=lambda n: n * 2),
