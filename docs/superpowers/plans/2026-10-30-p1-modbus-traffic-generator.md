@@ -824,6 +824,19 @@ def test_load_scenario_rejects_unsupported_variant(tmp_path):
     )
     with pytest.raises(ScenarioError, match="不支持的变体"):
         load_scenario(scn_path, catalog)
+
+
+def test_load_scenario_rejects_unknown_param(tmp_path):
+    """catalog 未声明的参数一律拒绝 —— catalog 是操作参数的唯一事实源。"""
+    cat_path = _write(tmp_path, "catalog.yaml", CATALOG)
+    catalog = load_catalog(cat_path)
+    scn_path = _write(
+        tmp_path,
+        "scenario.yaml",
+        {"name": "s1", "operations": [{"op": "demo.read_holding", "params": {"bogus": 1}}]},
+    )
+    with pytest.raises(ScenarioError, match="参数校验失败"):
+        load_scenario(scn_path, catalog)
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
@@ -945,6 +958,21 @@ class ScenarioModel(BaseModel):
     operations: list[ScenarioOperationModel]
 
 
+def _object_schema(entry: OperationEntry) -> dict[str, Any]:
+    """把 catalog 的逐参数 schema 映射拼成对象级 JSON Schema。
+
+    catalog 的 params 形如 {"quantity": {"type": "integer", ...}}，是
+    「参数名 -> 该参数的 schema」的映射。直接交给 jsonschema 会被当成一份
+    无约束的空 schema（关键字 quantity 不被识别），任何参数都能通过校验，
+    因此必须显式包成对象级 schema。
+    """
+    return {
+        "type": "object",
+        "properties": entry.params,
+        "additionalProperties": False,
+    }
+
+
 def _validate_params(entry: OperationEntry, params: dict[str, Any], path: Path, index: int) -> None:
     """用 catalog 声明的参数 schema 校验操作参数。"""
     if not entry.params:
@@ -953,7 +981,7 @@ def _validate_params(entry: OperationEntry, params: dict[str, Any], path: Path, 
                 f"场景 {path} 第 {index} 条操作 {entry.name!r} 不接受参数，但给出了 {params}"
             )
         return
-    validator = Draft202012Validator(entry.params)
+    validator = Draft202012Validator(_object_schema(entry))
     errors = sorted(validator.iter_errors(params), key=lambda e: list(e.path))
     if errors:
         details = "; ".join(f"{list(e.path) or '<根>'}: {e.message}" for e in errors)
@@ -1005,7 +1033,7 @@ def load_scenario(path: Path, catalog: Catalog) -> Scenario:
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python3 -m pytest tests/test_catalog.py -v`
-Expected: PASS —— 7 passed
+Expected: PASS —— 8 passed
 
 - [ ] **Step 5: 提交**
 
