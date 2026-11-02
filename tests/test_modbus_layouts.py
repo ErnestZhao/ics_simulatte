@@ -142,17 +142,28 @@ def test_fc11_report_slave_id_length():
     }
 
 
-def test_fc0c_event_log_count_is_element_count():
-    """FC0C 的 event_log_count 是事件条数，不是字节数。"""
+def test_fc0c_response_matches_spec():
+    """FC0C 响应 = byte_count(6 + 事件字节数) + status + event_count + message_count + 事件字节。"""
     layout = get_layout("fc0c")
-    raw = encode(layout.response, {"log": [0x0001, 0x0002]})
-    assert raw == b"\x00\x00\x00\x00\x00\x00\x02\x00\x01\x00\x02"
+    raw = encode(layout.response, {"events": b"\x21\x20"})
+    assert raw == b"\x08\x00\x00\x00\x00\x00\x00\x21\x20"
     assert decode(layout.response, raw) == {
+        "byte_count": 8,
         "status": 0,
         "event_count": 0,
         "message_count": 0,
-        "event_log_count": 2,
-        "log": [1, 2],
+        "events": b"\x21\x20",
+    }
+
+
+def test_fc01_response_is_bit_packed():
+    """FC01 响应数据按位打包：8 个线圈 = 1 字节，不是每线圈 2 字节。"""
+    layout = get_layout("fc01")
+    raw = encode(layout.response, {"values": b"\x05"})
+    assert raw == b"\x01\x05"
+    assert decode(layout.response, raw) == {
+        "byte_count": 1,
+        "values": b"\x05",
     }
 
 

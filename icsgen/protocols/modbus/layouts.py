@@ -38,7 +38,23 @@ DIAGNOSTIC_SUBFUNCTIONS: dict[int, str] = {
     0x0018: "Clear I/O Overrun Counter and Flag",
 }
 
-_READ_LAYOUT = Layout(
+#: FC0x01 / FC0x02 读位：响应数据按位打包，每 8 个线圈 1 字节
+_BIT_READ_LAYOUT = Layout(
+    request=(Field("start_addr", "uint16"), Field("quantity", "uint16")),
+    response=(
+        Field("byte_count", "uint8", count_of="values"),
+        Field(
+            "values",
+            "bytes",
+            count_from="byte_count",
+            len_from_request="quantity",
+            len_adjust=lambda n: (n + 7) // 8,
+        ),
+    ),
+)
+
+#: FC0x03 / FC0x04 读寄存器：响应数据每寄存器 2 字节
+_REGISTER_READ_LAYOUT = Layout(
     request=(Field("start_addr", "uint16"), Field("quantity", "uint16")),
     response=(
         Field("byte_count", "uint8", count_of="values", adjust=lambda n: n * 2),
@@ -92,10 +108,10 @@ _FILE_WRITE_FIELDS = (
 )
 
 LAYOUTS: dict[str, Layout] = {
-    "fc01": _READ_LAYOUT,
-    "fc02": _READ_LAYOUT,
-    "fc03": _READ_LAYOUT,
-    "fc04": _READ_LAYOUT,
+    "fc01": _BIT_READ_LAYOUT,
+    "fc02": _BIT_READ_LAYOUT,
+    "fc03": _REGISTER_READ_LAYOUT,
+    "fc04": _REGISTER_READ_LAYOUT,
     "fc05": _WRITE_SINGLE_LAYOUT,
     "fc06": _WRITE_SINGLE_LAYOUT,
     "fc07": Layout(request=(), response=(Field("status", "uint8"),)),
@@ -110,11 +126,11 @@ LAYOUTS: dict[str, Layout] = {
     "fc0c": Layout(
         request=(),
         response=(
+            Field("byte_count", "uint8", count_of="events", adjust=lambda n: n + 6),
             Field("status", "uint16", default=0),
             Field("event_count", "uint16", default=0),
             Field("message_count", "uint16", default=0),
-            Field("event_log_count", "uint8", count_of="log"),
-            Field("log", "uint16", count_from="event_log_count", count_is_elements=True, default=(0,)),
+            Field("events", "bytes", count_from="byte_count", count_adjust=lambda n: n - 6),
         ),
     ),
     "fc0f": Layout(

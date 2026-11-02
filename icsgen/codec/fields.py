@@ -28,6 +28,8 @@ class Field:
     count_of:  编码时本字段的值由被引用字段的元素个数决定（被引用字段是数组时取其长度）
     count_from: 解码时本字段是变长数组，元素个数由被引用字段的值除以本字段类型宽度得出
     len_from_request: 构造响应时本数组的元素个数取自请求中的该参数，仅用于构造
+    len_adjust: 构造响应时元素个数的线性修正，例如 Modbus FC0x01 的响应数据按位打包，
+                字节数是线圈数向上取整除以 8
     count_is_elements: 被引用字段给出的是元素个数而非字节数时置真，解码不再除以元素宽度
     count_adjust: 元素个数换算后的线性修正，例如 Modbus FC0x15 的记录长度以寄存器计，
                   字节数是它的两倍
@@ -40,6 +42,7 @@ class Field:
     count_of: str | None = None
     count_from: str | None = None
     len_from_request: str | None = None
+    len_adjust: Callable[[int], int] | None = None
     count_is_elements: bool = False
     count_adjust: Callable[[int], int] | None = None
     adjust: Callable[[int], int] | None = None
