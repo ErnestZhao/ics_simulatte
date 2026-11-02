@@ -1804,6 +1804,7 @@ _FILE_READ_REQUEST_FIELDS = (
 )
 
 #: FC0x14 读文件记录响应：两个长度字段都由记录数据长度推出
+#: 记录数据以寄存器计（请求的 record_length 个寄存器），字节数是它的两倍
 _FILE_READ_RESPONSE_FIELDS = (
     Field("byte_count", "uint8", count_of="record_data", adjust=lambda n: n + 2),
     Field("file_response_length", "uint8", count_of="record_data", adjust=lambda n: n + 1),
@@ -1813,6 +1814,8 @@ _FILE_READ_RESPONSE_FIELDS = (
         "bytes",
         count_from="file_response_length",
         count_adjust=lambda n: n - 1,
+        len_from_request="record_length",
+        len_adjust=lambda n: n * 2,
         default=b"\x00\x01\x00\x02",
     ),
 )
@@ -1978,7 +1981,7 @@ operations:
   - {name: modbus.write_single_coil, summary: 写单个线圈 (FC05), layout: fc05, func_code: 5, variants: [normal, boundary, exception], params: {start_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, value: {type: integer, minimum: 0, maximum: 65535, default: 65280}}}
   - {name: modbus.write_single_register, summary: 写单个保持寄存器 (FC06), layout: fc06, func_code: 6, variants: [normal, boundary, exception], params: {start_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, value: {type: integer, minimum: 0, maximum: 65535, default: 1}}}
   - {name: modbus.write_multiple_coils, summary: 写多个线圈 (FC0F), layout: fc0f, func_code: 15, variants: [normal, boundary, exception], params: {start_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, quantity: {type: integer, minimum: 1, maximum: 1968, default: 8}, values: {type: array, items: {type: integer, minimum: 0, maximum: 255}, minItems: 1, maxItems: 246, default: [255]}}}
-  - {name: modbus.write_multiple_registers, summary: 写多个保持寄存器 (FC10), layout: fc10, func_code: 16, variants: [normal, boundary, exception], params: {start_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, quantity: {type: integer, minimum: 1, maximum: 123, default: 2}, values: {type: array, items: {type: integer, minimum: 0, maximum: 65535}, minItems: 1, maxItems: 123, default: [1]}}}
+  - {name: modbus.write_multiple_registers, summary: 写多个保持寄存器 (FC10), layout: fc10, func_code: 16, variants: [normal, boundary, exception], params: {start_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, quantity: {type: integer, minimum: 1, maximum: 123, default: 2}, values: {type: array, items: {type: integer, minimum: 0, maximum: 65535}, minItems: 1, maxItems: 123, default: [1, 1]}}}
   - {name: modbus.mask_write_register, summary: 掩码写寄存器 (FC16), layout: fc16, func_code: 22, variants: [normal, boundary, exception], params: {start_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, and_mask: {type: integer, minimum: 0, maximum: 65535, default: 65280}, or_mask: {type: integer, minimum: 0, maximum: 65535, default: 0}}}
   # ---- 状态与诊断类功能码（5 个）----
   - {name: modbus.read_exception_status, summary: 读异常状态 (FC07), layout: fc07, func_code: 7, variants: [normal, exception], params: {}}
@@ -1989,7 +1992,7 @@ operations:
   # ---- 文件记录与读写类功能码（3 个）----
   - {name: modbus.read_file_record, summary: 读文件记录 (FC14), layout: fc14, func_code: 20, variants: [normal, boundary, exception], params: {reference_type: {type: integer, minimum: 0, maximum: 255, default: 6}, file_number: {type: integer, minimum: 0, maximum: 65535, default: 4}, record_number: {type: integer, minimum: 0, maximum: 65535, default: 0}, record_length: {type: integer, minimum: 1, maximum: 123, default: 1}}}
   - {name: modbus.write_file_record, summary: 写文件记录 (FC15), layout: fc15, func_code: 21, variants: [normal, boundary, exception], params: {reference_type: {type: integer, minimum: 0, maximum: 255, default: 6}, file_number: {type: integer, minimum: 0, maximum: 65535, default: 4}, record_number: {type: integer, minimum: 0, maximum: 65535, default: 0}, record_data: {type: array, items: {type: integer, minimum: 0, maximum: 255}, minItems: 2, maxItems: 246, default: [0, 1, 0, 2]}}}
-  - {name: modbus.read_write_multiple_registers, summary: 读写多个保持寄存器 (FC17), layout: fc17, func_code: 23, variants: [normal, boundary, exception], params: {read_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, read_quantity: {type: integer, minimum: 1, maximum: 125, default: 1}, write_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, write_quantity: {type: integer, minimum: 1, maximum: 121, default: 1}}}
+  - {name: modbus.read_write_multiple_registers, summary: 读写多个保持寄存器 (FC17), layout: fc17, func_code: 23, variants: [normal, boundary, exception], params: {read_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, read_quantity: {type: integer, minimum: 1, maximum: 125, default: 1}, write_addr: {type: integer, minimum: 0, maximum: 65535, default: 0}, write_quantity: {type: integer, minimum: 1, maximum: 121, default: 1}, write_values: {type: array, items: {type: integer, minimum: 0, maximum: 65535}, minItems: 1, maxItems: 121, default: [1]}}}
   # ---- 设备标识 MEI（2 个：basic 与 specific 两种访问方式）----
   - {name: modbus.read_device_identification, summary: 读设备标识 MEI-basic (FC2B), layout: fc2b, func_code: 43, variants: [normal, boundary, exception], params: {read_device_id_code: {type: integer, minimum: 1, maximum: 3, default: 1}, object_id: {type: integer, minimum: 0, maximum: 255, default: 0}}}
   - {name: modbus.read_device_identification_specific, summary: 读设备标识 MEI-specific (FC2B), layout: fc2b, func_code: 43, variants: [normal, boundary, exception], params: {read_device_id_code: {type: integer, minimum: 4, maximum: 4, default: 4}, object_id: {type: integer, minimum: 0, maximum: 255, default: 0}}}
@@ -2052,26 +2055,33 @@ EOF
 **Files:**
 - Create: `icsgen/protocols/modbus/variants.py`
 - Create: `tests/test_modbus_variants.py`
+- Modify: `icsgen/protocols/modbus/layouts.py`（FC0x14 响应的记录数据长度改由请求的 `record_length` 推出）
 
 **Interfaces:**
 - Consumes: `icsgen.codec.fields.Layout`、`icsgen.protocols.modbus.layouts.get_layout`（Task 4）、`icsgen.spec.model.Variant`（Task 1）
 - 注意：Task 4 给 `Field` 加了 `len_adjust`（构造路径上的元素个数修正），本任务的 `_element_count` 必须区分「来自请求」与「来自长度字段」两条路径 —— 前者用 `len_adjust`，后者用 `count_adjust`。
 - Produces:
   - `icsgen.protocols.modbus.variants.VariantPlan`：`frozen dataclass`，字段 `func_code: int`、`request_values: dict[str, Any]`、`response_values: dict[str, Any]`、`is_exception: bool`、`metadata: dict[str, Any]`
-  - `icsgen.protocols.modbus.variants.plan_variant(layout: Layout, op_name: str, func_code: int, params: dict[str, Any], variant: Variant, maxima: dict[str, int] | None = None) -> VariantPlan`
+  - `icsgen.protocols.modbus.variants.plan_variant(layout: Layout, op_name: str, func_code: int, params: dict[str, Any], variant: Variant, maxima: dict[str, int] | None = None, max_counts: dict[str, int] | None = None) -> VariantPlan`
 
 **变体策略**：
 
 | 变体 | 请求 | 响应 |
 |---|---|---|
 | `normal` | 按 catalog 参数默认值填充 | 按布局生成合理的默认值 |
-| `boundary` | 把数值型参数取上界（如 quantity 用 catalog 的 maximum）；数组参数逐元素取元素上界 | 同 normal |
+| `boundary` | 标量参数取上界（`maxima`）；数组参数取最大元素个数（`max_counts`）并把每个元素顶到元素上界（`maxima`） | 同 normal |
 | `exception` | 请求同 normal | 异常响应：功能码 \| 0x80 + 异常码（默认 0x02 非法数据地址） |
 | `illegal_fc` | 功能码就是 catalog 条目声明的非法功能码 | 异常响应：功能码 \| 0x80 + 异常码 0x01 非法功能码 |
 | `malformed` | 请求同 normal，但长度字段与实际内容不符 | 无响应 |
 
 > `illegal_fc` 变体的功能码不再由参数携带：catalog 条目 `modbus.illegal_function_code`
 > 的 `func_code` 本身就是保留值（99），参数里再放一个功能码会形成第二事实源。
+
+> **边界变体为什么要两个上界**：catalog 对数组参数同时声明了「元素个数上界」（`maxItems`）
+> 与「元素值上界」（`items.maximum`）。只顶元素值而不顶元素个数，会让帧自相矛盾 ——
+> FC10 写多个寄存器若 `quantity` 顶到 123 而 `values` 只有 2 个元素，从站会直接判为协议错误，
+> 而这份流量挂在 `legit` 语义层下。故 `maxima` 传元素值上界，`max_counts` 传元素个数上界，
+> 两者都来自 catalog，由适配器（Task 11）读出后传入。
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -2080,6 +2090,7 @@ EOF
 ```python
 """Modbus 变体语义：同一操作的正常/边界/异常/非法功能码形态。"""
 
+from icsgen.codec.encoder import encode
 from icsgen.protocols.modbus.layouts import get_layout
 from icsgen.protocols.modbus.variants import plan_variant
 from icsgen.spec.model import Variant
@@ -2190,6 +2201,75 @@ def test_file_write_response_length_fields_are_consistent():
     assert plan.response_values["record_length"] == 2
     assert plan.response_values["byte_count"] == 11
     assert len(plan.response_values["record_data"]) == 4
+
+
+def test_circular_array_placeholder_is_a_sequence():
+    """数组的长度来源是长度字段（环状引用）时，占位值必须是序列而不是标量。
+
+    FC17 的 write_values 长度由 write_byte_count 推出，而 write_byte_count 又由
+    write_values 推出 —— 没有参数时无法反推，只能给一个最小长度的占位数组。
+    给标量会让编码器在遍历数组时抛裸 TypeError。
+    """
+    layout = get_layout("fc17")
+    plan = plan_variant(layout, "modbus.read_write_multiple_registers", 23, {}, Variant.NORMAL)
+    assert plan.request_values["write_values"] == [0]
+    assert encode(layout.request, plan.request_values) == b"\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00"
+
+
+def test_boundary_grows_array_to_max_count():
+    """边界变体把数组顶到最大元素个数，长度字段随之自洽。"""
+    layout = get_layout("fc10")
+    plan = plan_variant(
+        layout,
+        "modbus.write_multiple_registers",
+        16,
+        {"quantity": 2, "values": [1, 1]},
+        Variant.BOUNDARY,
+        maxima={"quantity": 123, "values": 0xFFFF},
+        max_counts={"values": 123},
+    )
+    assert plan.request_values["quantity"] == 123
+    assert plan.request_values["values"] == [0xFFFF] * 123
+    assert plan.request_values["byte_count"] == 246
+
+
+def test_boundary_grows_bytes_array_to_max_count():
+    """字节数组（FC0F 的线圈位图）同样顶到最大元素个数。"""
+    layout = get_layout("fc0f")
+    plan = plan_variant(
+        layout,
+        "modbus.write_multiple_coils",
+        15,
+        {"quantity": 8, "values": b"\xff"},
+        Variant.BOUNDARY,
+        maxima={"quantity": 1968, "values": 255},
+        max_counts={"values": 246},
+    )
+    assert plan.request_values["quantity"] == 1968
+    assert plan.request_values["values"] == b"\xff" * 246
+    assert plan.request_values["byte_count"] == 246
+
+
+def test_fc14_response_record_data_follows_requested_length():
+    """FC14 响应带回请求的记录长度：记录长度以寄存器计，字节数是它的两倍。"""
+    layout = get_layout("fc14")
+    plan = plan_variant(
+        layout,
+        "modbus.read_file_record",
+        20,
+        {"record_length": 2},
+        Variant.NORMAL,
+    )
+    assert plan.response_values["record_data"] == b"\x00\x00\x00\x00"
+    assert plan.response_values["file_response_length"] == 5
+    assert plan.response_values["byte_count"] == 6
+
+
+def test_metadata_carries_operation_name():
+    """取值方案的元数据带上操作名，帧才能溯源到操作类型。"""
+    layout = get_layout("fc03")
+    plan = plan_variant(layout, "modbus.read_holding_registers", 3, {"quantity": 3}, Variant.NORMAL)
+    assert plan.metadata["op"] == "modbus.read_holding_registers"
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
@@ -2207,6 +2287,10 @@ Expected: FAIL —— `ModuleNotFoundError: No module named 'icsgen.protocols.mo
 同一操作在不同变体下的取值策略集中在这里：normal 取常规值，boundary 取
 参数上界，exception 产生协议异常响应，illegal_fc 使用非法功能码，
 malformed 构造长度字段与实际内容不符的畸形帧。
+
+边界变体需要两个上界：``maxima`` 是标量参数的上界与数组元素的上界，
+``max_counts`` 是数组参数的元素个数上界。两者都来自 catalog，缺一不可 ——
+只顶元素值会让帧里的计数标量与实际内容自相矛盾。
 """
 
 from __future__ import annotations
@@ -2240,6 +2324,18 @@ def _default_for(f: Field) -> Any:
     if f.type == "bytes":
         return b""
     return 0
+
+
+def _array_placeholder(f: Field) -> Any:
+    """给变长数组造一个类型正确的占位值（一个元素）。
+
+    数组的元素个数来自长度字段、而长度字段又由数组长度推出时，数组无法
+    反推，只能给一个最小长度的占位。占位必须是序列：给标量会让编码器在
+    遍历数组时抛裸 TypeError。
+    """
+    if f.type == "bytes":
+        return b"\x00"
+    return [0]
 
 
 def _element_count(f: Field, raw: int, from_request: bool = False) -> int:
@@ -2313,7 +2409,7 @@ def _build_values(layout: Layout, params: dict[str, Any]) -> dict[str, Any]:
         raw = values.get(f.count_from) if source is not None else None
         if source is None or source.count_of is not None or raw is None:
             # 长度字段本身由数组长度推出，无法反推数组
-            values[f.name] = _default_for(f)
+            values[f.name] = _array_placeholder(f)
             continue
         count = _element_count(f, raw)
         values[f.name] = b"\x00" * count if f.type == "bytes" else [0] * count
@@ -2324,18 +2420,28 @@ def _build_values(layout: Layout, params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _apply_boundary(
-    layout: Layout, params: dict[str, Any], maxima: dict[str, int]
+    layout: Layout,
+    params: dict[str, Any],
+    maxima: dict[str, int],
+    max_counts: dict[str, int],
 ) -> dict[str, Any]:
-    """把参数顶到上界：标量参数取其最大值，数组参数逐元素取元素最大值。"""
+    """把参数顶到上界。
+
+    标量参数取其最大值；数组参数取最大元素个数（``max_counts``），并把每个
+    元素顶到元素上界（``maxima``）。数组长度必须一起顶 —— 只顶元素值会让帧
+    里的计数标量与实际内容对不上。
+    """
     values = _build_values(layout, params)
     for name, maximum in maxima.items():
         current = values.get(name)
-        if isinstance(current, bool) or not isinstance(current, (int, list, tuple)):
+        if isinstance(current, bool):
             continue
         if isinstance(current, int):
             values[name] = maximum
-        else:
-            values[name] = [maximum] * len(current)
+        elif isinstance(current, (list, tuple)):
+            values[name] = [maximum] * max_counts.get(name, len(current))
+        elif isinstance(current, (bytes, bytearray)):
+            values[name] = bytes([maximum & 0xFF]) * max_counts.get(name, len(current))
     _apply_length_fields(layout.request, values)
     return values
 
@@ -2356,7 +2462,7 @@ def _build_response(layout: Layout, request_values: dict[str, Any]) -> dict[str,
         raw = request_values.get(source)
         if raw is None:
             # 长度来源不可得（它本身由数组长度推出），退回字段缺省值
-            values[f.name] = f.default if f.default is not None else _default_for(f)
+            values[f.name] = f.default if f.default is not None else _array_placeholder(f)
             continue
         count = _element_count(f, raw, from_request=f.len_from_request is not None)
         values[f.name] = b"\x00" * count if f.type == "bytes" else [0] * count
@@ -2379,12 +2485,15 @@ def plan_variant(
     params: dict[str, Any],
     variant: Variant,
     maxima: dict[str, int] | None = None,
+    max_counts: dict[str, int] | None = None,
 ) -> VariantPlan:
     """为一个操作在特定变体下制定取值方案。
 
-    maxima 为 catalog 中各参数的上界，boundary 变体据此把参数顶到边界。
+    maxima 是标量参数的上界与数组元素的上界，max_counts 是数组参数的元素
+    个数上界；boundary 变体据此把参数顶到边界。
     """
     maxima = maxima or {}
+    max_counts = max_counts or {}
 
     if variant is Variant.ILLEGAL_FC:
         # 非法功能码由 catalog 条目自身的 func_code 决定
@@ -2395,6 +2504,7 @@ def plan_variant(
             response_values={},
             is_exception=True,
             metadata={
+                "op": op_name,
                 "exception_code": ILLEGAL_FUNCTION_EXCEPTION_CODE,
                 "illegal_function_code": func_code,
             },
@@ -2407,11 +2517,11 @@ def plan_variant(
             request_values=request_values,
             response_values={},
             is_exception=False,
-            metadata={"malformed": True},
+            metadata={"op": op_name, "malformed": True},
         )
 
     if variant is Variant.BOUNDARY:
-        request_values = _apply_boundary(layout, params, maxima)
+        request_values = _apply_boundary(layout, params, maxima, max_counts)
     else:
         request_values = _build_values(layout, params)
 
@@ -2423,7 +2533,7 @@ def plan_variant(
             request_values=request_values,
             response_values={},
             is_exception=True,
-            metadata={"exception_code": DEFAULT_EXCEPTION_CODE},
+            metadata={"op": op_name, "exception_code": DEFAULT_EXCEPTION_CODE},
         )
 
     return VariantPlan(
@@ -2431,19 +2541,19 @@ def plan_variant(
         request_values=request_values,
         response_values=response_values,
         is_exception=False,
-        metadata={},
+        metadata={"op": op_name},
     )
 ```
 
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python3 -m pytest tests/test_modbus_variants.py -v`
-Expected: PASS —— 10 passed
+Expected: PASS —— 15 passed
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add icsgen/protocols/modbus/variants.py tests/test_modbus_variants.py
+git add icsgen/protocols/modbus/variants.py icsgen/protocols/modbus/layouts.py tests/test_modbus_variants.py
 git commit -m "$(cat <<'EOF'
 feat: Modbus 变体语义
 
@@ -3945,6 +4055,15 @@ class ModbusAdapter:
                 and "maximum" in spec["items"]
             }
         )
+        # 数组参数的元素个数上界：只顶元素值而不顶个数，帧里的计数标量
+        # 会与实际内容对不上
+        max_counts = {
+            name: int(spec["maxItems"])
+            for name, spec in entry.params.items()
+            if isinstance(spec, dict)
+            and spec.get("type") == "array"
+            and "maxItems" in spec
+        }
         func_code = entry.func_code if entry.func_code is not None else 0
         plan = plan_variant(
             layout=layout,
@@ -3953,6 +4072,7 @@ class ModbusAdapter:
             params={**defaults, **op.params},
             variant=op.variant,
             maxima=maxima,
+            max_counts=max_counts,
         )
 
         request_pdu = framing.build_pdu(
