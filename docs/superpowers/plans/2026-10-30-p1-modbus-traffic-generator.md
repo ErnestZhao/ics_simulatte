@@ -3496,13 +3496,14 @@ def test_pcap_is_grouped_by_tier_and_transport(tmp_path):
 
 
 def test_manifest_records_pcap_position(tmp_path):
-    root = tmp_path / "ds"
-    write_dataset(
-        "demo",
-        root,
-        [_artifact()],
-        {"legit/modbus_tcp": [encapsulate(b"\x01", TransportSpec())]},
+    """manifest 记录产物所在的 pcap 文件与包序号。"""
+    builder = DatasetBuilder("demo", tmp_path / "ds")
+    builder.add(_artifact())
+    builder.add_linked_packets(
+        "modbus.read_holding_registers#001",
+        [encapsulate(b"\x01", TransportSpec())],
     )
+    root = builder.write()
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
     entry = manifest["artifacts"][0]
     assert entry["pcap_file"] == "legit/modbus_tcp/session.pcap"
@@ -3686,6 +3687,9 @@ def write_dataset(
     positions 为「产物 id → (会话键, 包序号)」，response_positions 为响应
     帧的同类记录，由 DatasetBuilder 在挂载链路字节时记录，用于在 manifest
     中精确定位每条产物所在的请求包与响应包。
+
+    只有 positions 命中的产物才会带上 ``pcap_file`` / ``pcap_index`` 字段；
+    直接调用本函数而不传 positions 时，manifest 里不会有包位置信息。
     """
     root.mkdir(parents=True, exist_ok=True)
     positions = positions or {}
@@ -3749,7 +3753,7 @@ def write_dataset(
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python3 -m pytest tests/test_emit_dataset.py -v`
-Expected: PASS —— 7 passed
+Expected: PASS —— 8 passed
 
 - [ ] **Step 5: 提交**
 
