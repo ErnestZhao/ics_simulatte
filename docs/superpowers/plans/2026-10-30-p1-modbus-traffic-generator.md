@@ -837,6 +837,58 @@ def test_load_scenario_rejects_unknown_param(tmp_path):
     )
     with pytest.raises(ScenarioError, match="参数校验失败"):
         load_scenario(scn_path, catalog)
+
+
+def test_load_scenario_rejects_tier_variant_conflict(tmp_path):
+    """显式 tier 与 variant 冲突时按场景错误报告，而不是逃逸裸 ValueError。"""
+    cat_path = _write(tmp_path, "catalog.yaml", CATALOG)
+    catalog = load_catalog(cat_path)
+    scn_path = _write(
+        tmp_path,
+        "scenario.yaml",
+        {
+            "name": "s1",
+            "operations": [
+                {"op": "demo.read_holding", "variant": "boundary", "tier": "abnormal"}
+            ],
+        },
+    )
+    with pytest.raises(ScenarioError, match="冲突"):
+        load_scenario(scn_path, catalog)
+
+
+def test_load_catalog_rejects_unknown_param_type(tmp_path):
+    """catalog 里的参数 schema 引用未知类型时报错，而不是逃逸第三方异常。"""
+    bad = {
+        "protocol": "demo",
+        "operations": [
+            {
+                "name": "demo.read_holding",
+                "layout": "fc03",
+                "params": {"quantity": {"type": "not-a-real-type"}},
+            }
+        ],
+    }
+    path = _write(tmp_path, "catalog.yaml", bad)
+    with pytest.raises(ValueError, match="schema 非法"):
+        load_catalog(path)
+
+
+def test_load_catalog_rejects_non_object_param_schema(tmp_path):
+    """catalog 里的参数 schema 不是对象时报错。"""
+    bad = {
+        "protocol": "demo",
+        "operations": [
+            {
+                "name": "demo.read_holding",
+                "layout": "fc03",
+                "params": {"quantity": "integer"},
+            }
+        ],
+    }
+    path = _write(tmp_path, "catalog.yaml", bad)
+    with pytest.raises(ValueError, match="必须是对象"):
+        load_catalog(path)
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
@@ -862,11 +914,18 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
 from pydantic import BaseModel, Field
 
 
 class OperationEntry(BaseModel):
-    """catalog 中的一个操作类型条目。"""
+    """catalog 中的一个操作类型条目。
+
+    params 是「参数名 -> 该参数的 JSON Schema 片段」的映射；其中的 default
+    键仅作文档说明，参数缺省值由字段布局的 Field.default 决定，加载时不会
+    自动填充。
+    """
 
     name: str
     summary: str = ""
@@ -903,10 +962,32 @@ class Catalog:
         return len(self.operations)
 
 
+def _check_params_schema(entry: OperationEntry, path: Path) -> None:
+    """自检 catalog 声明的参数 schema，把手写 YAML 的错误挡在加载期。
+
+    params 是「参数名 -> 该参数的 JSON Schema 片段」的映射：片段不是对象，
+    或引用了未知的类型关键字，交给 jsonschema 会抛出第三方异常甚至
+    AttributeError，调用方难以判断是自己写错了 catalog。
+    """
+    for param, schema in entry.params.items():
+        if not isinstance(schema, dict):
+            raise ValueError(
+                f"catalog {path} 中操作 {entry.name!r} 的参数 {param!r} 的 schema 必须是对象"
+            )
+        try:
+            Draft202012Validator.check_schema(schema)
+        except SchemaError as exc:
+            raise ValueError(
+                f"catalog {path} 中操作 {entry.name!r} 的参数 {param!r} 的 schema 非法：{exc.message}"
+            ) from exc
+
+
 def load_catalog(path: Path) -> Catalog:
     """从 YAML 文件加载 catalog。"""
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     model = CatalogModel.model_validate(raw)
+    for entry in model.operations:
+        _check_params_schema(entry, path)
     operations = {entry.name: entry for entry in model.operations}
     if len(operations) != len(model.operations):
         raise ValueError(f"catalog {path} 中存在重复的操作名")
@@ -1004,7 +1085,7 @@ def load_scenario(path: Path, catalog: Catalog) -> Scenario:
             entry = catalog.get(item.op)
         except KeyError as exc:
             raise ScenarioError(
-                f"场景 {path} 第 {index} 条操作 {item.op!r} 不存在操作"
+                f"场景 {path} 第 {index} 条操作 {item.op!r}：catalog {catalog.protocol!r} 中不存在操作"
             ) from exc
         if item.variant.value not in entry.variants:
             raise ScenarioError(
@@ -1012,15 +1093,21 @@ def load_scenario(path: Path, catalog: Catalog) -> Scenario:
                 f"可用变体：{entry.variants}"
             )
         _validate_params(entry, item.params, path, index)
-        operations.append(
-            Operation(
+        try:
+            operation = Operation(
                 op=item.op,
                 params=item.params,
                 variant=item.variant,
                 tier=item.tier,
                 expect_response=item.expect_response,
             )
-        )
+        except ValueError as exc:
+            # tier 与 variant 冲突由 Operation 构造时发现，这里统一转成场景错误，
+            # 保证 load_scenario 对外只有 ScenarioError 一种失败形态。
+            raise ScenarioError(
+                f"场景 {path} 第 {index} 条操作 {item.op!r} 的语义层与变体冲突：{exc}"
+            ) from exc
+        operations.append(operation)
 
     return Scenario(
         name=model.name,
@@ -1033,7 +1120,7 @@ def load_scenario(path: Path, catalog: Catalog) -> Scenario:
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python3 -m pytest tests/test_catalog.py -v`
-Expected: PASS —— 8 passed
+Expected: PASS —— 11 passed
 
 - [ ] **Step 5: 提交**
 
