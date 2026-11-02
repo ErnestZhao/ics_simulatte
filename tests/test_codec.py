@@ -2,7 +2,7 @@
 
 import pytest
 
-from icsgen.codec.decoder import decode
+from icsgen.codec.decoder import DecodeError, decode
 from icsgen.codec.encoder import CodecError, encode
 from icsgen.codec.fields import Field, Layout
 
@@ -73,3 +73,25 @@ def test_layout_holds_request_and_response():
     layout = Layout(request=(Field("a", "uint8"),), response=(Field("b", "uint16"),))
     assert len(layout.request) == 1
     assert len(layout.response) == 1
+
+
+def test_bytes_field_round_trips():
+    """bytes 型变长字段编码后能原样解码回来（编解码器对称）。"""
+    fields = (Field("length", "uint8", count_of="data"), Field("data", "bytes", count_from="length"))
+    encoded = encode(fields, {"data": b"\x01\x02"})
+    assert encoded == b"\x02\x01\x02"
+    assert decode(fields, encoded) == {"length": 2, "data": b"\x01\x02"}
+
+
+def test_encode_bytes_value_out_of_range_raises():
+    """bytes 类型的值域错误收敛为 CodecError，而不是裸 ValueError。"""
+    fields = (Field("length", "uint8", count_of="data"), Field("data", "bytes", count_from="length"))
+    with pytest.raises(CodecError, match="无法编码为 bytes"):
+        encode(fields, {"data": [256]})
+
+
+def test_decode_unknown_type_raises():
+    """未知字段类型解码时报 DecodeError，而不是裸 KeyError。"""
+    fields = (Field("n", "uint8"), Field("weird", "uint64", count_from="n"))
+    with pytest.raises(DecodeError, match="未知字段类型"):
+        decode(fields, b"\x02\x00")

@@ -16,12 +16,12 @@ def _pack_value(ftype: str, value: Any) -> bytes:
     size = FIELD_SIZES.get(ftype)
     if size is None:
         raise CodecError(f"未知字段类型 {ftype!r}")
-    if ftype == "bytes":
-        # bytes 类型视作 1 字节元素：整数按单字节写出，字节串按原样写出
-        if isinstance(value, int):
-            return bytes([value])
-        return bytes(value)
     try:
+        if ftype == "bytes":
+            # bytes 类型视作 1 字节元素：整数按单字节写出，字节串按原样写出
+            if isinstance(value, int):
+                return bytes([value])
+            return bytes(value)
         return int(value).to_bytes(size, "big", signed=ftype.startswith("int"))
     except (TypeError, ValueError) as exc:
         raise CodecError(f"值 {value!r} 无法编码为 {ftype}") from exc
@@ -51,11 +51,8 @@ def encode(fields: tuple[Field, ...], values: Mapping[str, Any]) -> bytes:
             items = values.get(f.name)
             if items is None:
                 raise CodecError(f"缺少数组字段 {f.name!r}")
-            if f.type == "bytes":
-                # bytes 字段的元素是 1 字节整数，逐个写出
-                for item in bytes(items):
-                    out += _pack_value(f.type, item)
-                continue
+            # bytes 类型的变长字段，其元素是 1 字节整数或 1 字节字节串，
+            # 两种形态都由 _pack_value 统一处理，编码结果与解码器对称。
             for item in items:
                 out += _pack_value(f.type, item)
             continue

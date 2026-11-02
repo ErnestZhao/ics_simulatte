@@ -30,6 +30,7 @@ def decode(fields: tuple[Field, ...], data: bytes, offset: int = 0) -> dict[str,
 
     count_from 字段的元素个数 = 被引用字段的值 ÷ 本字段类型宽度；
     count_of 字段在解码时按普通定长字段处理。
+    bytes 类型的变长字段解码为连续的 bytes 对象，与编码器对称。
     """
     values: dict[str, Any] = {}
     for f in fields:
@@ -37,8 +38,20 @@ def decode(fields: tuple[Field, ...], data: bytes, offset: int = 0) -> dict[str,
             referenced = values.get(f.count_from)
             if referenced is None:
                 raise DecodeError(f"字段 {f.name!r} 依赖的 {f.count_from!r} 尚未解码")
-            width = FIELD_SIZES[f.type]
+            width = FIELD_SIZES.get(f.type)
+            if width is None:
+                raise DecodeError(f"未知字段类型 {f.type!r}")
             count = int(referenced) // width
+            if f.type == "bytes":
+                # bytes 类型宽度为 1，长度即字节数，直接切片返回连续字节串
+                if offset + count > len(data):
+                    remaining = len(data) - offset
+                    raise DecodeError(
+                        f"数据不足：偏移 {offset} 需要 {count} 字节，实际剩余 {remaining} 字节"
+                    )
+                values[f.name] = data[offset : offset + count]
+                offset += count
+                continue
             items: list[Any] = []
             for _ in range(count):
                 items.append(_unpack_value(f.type, data, offset))
