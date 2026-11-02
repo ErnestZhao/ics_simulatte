@@ -374,7 +374,7 @@ EOF
 
 import pytest
 
-from icsgen.codec.decoder import decode
+from icsgen.codec.decoder import DecodeError, decode
 from icsgen.codec.encoder import CodecError, encode
 from icsgen.codec.fields import Field, Layout
 
@@ -445,6 +445,28 @@ def test_layout_holds_request_and_response():
     layout = Layout(request=(Field("a", "uint8"),), response=(Field("b", "uint16"),))
     assert len(layout.request) == 1
     assert len(layout.response) == 1
+
+
+def test_bytes_field_round_trips():
+    """bytes 型变长字段编码后能原样解码回来（编解码器对称）。"""
+    fields = (Field("length", "uint8", count_of="data"), Field("data", "bytes", count_from="length"))
+    encoded = encode(fields, {"data": b"\x01\x02"})
+    assert encoded == b"\x02\x01\x02"
+    assert decode(fields, encoded) == {"length": 2, "data": b"\x01\x02"}
+
+
+def test_encode_bytes_value_out_of_range_raises():
+    """bytes 类型的值域错误收敛为 CodecError，而不是裸 ValueError。"""
+    fields = (Field("length", "uint8", count_of="data"), Field("data", "bytes", count_from="length"))
+    with pytest.raises(CodecError, match="无法编码为 bytes"):
+        encode(fields, {"data": [256]})
+
+
+def test_decode_unknown_type_raises():
+    """未知字段类型解码时报 DecodeError，而不是裸 KeyError。"""
+    fields = (Field("n", "uint8"), Field("weird", "uint64", count_from="n"))
+    with pytest.raises(DecodeError, match="未知字段类型"):
+        decode(fields, b"\x02\x00")
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
@@ -531,9 +553,12 @@ def _pack_value(ftype: str, value: Any) -> bytes:
     size = FIELD_SIZES.get(ftype)
     if size is None:
         raise CodecError(f"未知字段类型 {ftype!r}")
-    if ftype == "bytes":
-        return bytes(value)
     try:
+        if ftype == "bytes":
+            # bytes 类型视作 1 字节元素：整数按单字节写出，字节串按原样写出
+            if isinstance(value, int):
+                return bytes([value])
+            return bytes(value)
         return int(value).to_bytes(size, "big", signed=ftype.startswith("int"))
     except (TypeError, ValueError) as exc:
         raise CodecError(f"值 {value!r} 无法编码为 {ftype}") from exc
@@ -563,6 +588,8 @@ def encode(fields: tuple[Field, ...], values: Mapping[str, Any]) -> bytes:
             items = values.get(f.name)
             if items is None:
                 raise CodecError(f"缺少数组字段 {f.name!r}")
+            # bytes 类型的变长字段，其元素是 1 字节整数或 1 字节字节串，
+            # 两种形态都由 _pack_value 统一处理，编码结果与解码器对称。
             for item in items:
                 out += _pack_value(f.type, item)
             continue
@@ -610,6 +637,7 @@ def decode(fields: tuple[Field, ...], data: bytes, offset: int = 0) -> dict[str,
 
     count_from 字段的元素个数 = 被引用字段的值 ÷ 本字段类型宽度；
     count_of 字段在解码时按普通定长字段处理。
+    bytes 类型的变长字段解码为连续的 bytes 对象，与编码器对称。
     """
     values: dict[str, Any] = {}
     for f in fields:
@@ -617,8 +645,20 @@ def decode(fields: tuple[Field, ...], data: bytes, offset: int = 0) -> dict[str,
             referenced = values.get(f.count_from)
             if referenced is None:
                 raise DecodeError(f"字段 {f.name!r} 依赖的 {f.count_from!r} 尚未解码")
-            width = FIELD_SIZES[f.type]
+            width = FIELD_SIZES.get(f.type)
+            if width is None:
+                raise DecodeError(f"未知字段类型 {f.type!r}")
             count = int(referenced) // width
+            if f.type == "bytes":
+                # bytes 类型宽度为 1，长度即字节数，直接切片返回连续字节串
+                if offset + count > len(data):
+                    remaining = len(data) - offset
+                    raise DecodeError(
+                        f"数据不足：偏移 {offset} 需要 {count} 字节，实际剩余 {remaining} 字节"
+                    )
+                values[f.name] = data[offset : offset + count]
+                offset += count
+                continue
             items: list[Any] = []
             for _ in range(count):
                 items.append(_unpack_value(f.type, data, offset))
@@ -633,7 +673,7 @@ def decode(fields: tuple[Field, ...], data: bytes, offset: int = 0) -> dict[str,
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python3 -m pytest tests/test_codec.py -v`
-Expected: PASS —— 11 passed
+Expected: PASS —— 14 passed
 
 - [ ] **Step 5: 提交**
 
