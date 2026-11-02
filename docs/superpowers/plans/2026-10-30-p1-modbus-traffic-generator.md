@@ -1147,7 +1147,7 @@ EOF
 - Create: `icsgen/protocols/modbus/layouts.py`
 - Create: `icsgen/protocols/modbus/catalog.yaml`
 - Create: `tests/test_modbus_layouts.py`
-- Modify: `icsgen/codec/fields.py`（新增 `count_is_elements` 与 `count_adjust` 两个长度换算开关）
+- Modify: `icsgen/codec/fields.py`（新增 `len_adjust`、`count_is_elements` 与 `count_adjust` 三个长度换算开关）
 - Modify: `icsgen/codec/decoder.py`（按新开关解释 `count_from` 的元素个数）
 - Modify: `icsgen/codec/encoder.py`（`count_of` / `count_from` 缺值时回退到字段缺省值）
 - Modify: `icsgen/spec/catalog.py`（移除 `OperationEntry.tier`，catalog 模型拒绝未知键）
@@ -1156,8 +1156,9 @@ EOF
 **Interfaces:**
 - Consumes: `icsgen.codec.fields.Field`、`icsgen.codec.fields.Layout`（Task 2）、`icsgen.spec.catalog.load_catalog`（Task 3）
 - Produces:
+  - `icsgen.codec.fields.Field.len_adjust: Callable[[int], int] | None = None` —— **构造**响应时元素个数的线性修正（只作用于 `len_from_request` 路径，不影响解码）
   - `icsgen.codec.fields.Field.count_is_elements: bool = False` —— 被引用字段给出的是**元素个数**而非字节数时置真，解码不再除以元素宽度
-  - `icsgen.codec.fields.Field.count_adjust: Callable[[int], int] | None = None` —— 元素个数换算后的线性修正
+  - `icsgen.codec.fields.Field.count_adjust: Callable[[int], int] | None = None` —— 解码时元素个数换算后的线性修正
   - `icsgen.protocols.modbus.layouts.LAYOUTS: dict[str, Layout]` —— 布局名 → 布局，共 19 个
   - `icsgen.protocols.modbus.layouts.get_layout(name: str) -> Layout`（不存在时抛 `KeyError`）
   - `icsgen.protocols.modbus.layouts.DIAGNOSTIC_SUBFUNCTIONS: dict[int, str]` —— 诊断子功能码 → 名称，共 21 项
@@ -1165,7 +1166,7 @@ EOF
   - `icsgen.spec.catalog.Catalog.transports: tuple[str, ...]` —— catalog 声明的传输方式，缺省 `("tcp",)`
   - `icsgen.spec.catalog.Catalog.coverage_count() -> int` —— 覆盖条目数 = Σ(每个操作类型的变体数) × 传输数
 
-**为什么需要两个新的长度换算开关**：Modbus 的长度字段有两种形态 —— **字节计数**（`byte_count`，值 = 数据字节数）与**元素计数**（FC0x18 的 `fifo_count`、FC0x0C 的 `event_log_count`，值 = 元素个数）。原内核只有「元素个数 = 引用值 ÷ 元素宽度」一条规则，遇到元素计数字段会把个数算少一半。`count_is_elements` 声明引用值本身就是元素个数；`count_adjust` 在换算后对个数做一次修正（如 FC0x15 的 `record_length` 是寄存器数，字节数是它的两倍）。
+**为什么需要三个新的长度换算开关**：Modbus 的长度字段有两种形态 —— **字节计数**（`byte_count`，值 = 数据字节数）与**元素计数**（FC0x18 的 `fifo_count`，值 = 元素个数）。原内核只有「元素个数 = 引用值 ÷ 元素宽度」一条规则，遇到元素计数字段会把个数算少一半。`count_is_elements` 声明引用值本身就是元素个数；`count_adjust` 在**解码**换算后对个数做一次修正（如 FC0x15 的 `record_length` 是寄存器数，字节数是它的两倍）；`len_adjust` 是**构造**路径上的对应物（如 FC0x01 的响应数据按位打包，字节数 = 线圈数 ÷ 8 向上取整），两者作用在不同路径上，不可互相替代。
 
 **为什么移除 `OperationEntry.tier`**：语义层由变体唯一决定（`icsgen.spec.model.VARIANT_TIER`）。catalog 再声明一个 tier 就成了第二事实源，而且对「同一操作类型既有合法变体（normal）又有异常变体（exception）」的情况必然自相矛盾 —— 例如 `modbus.read_coils` 声明 `tier: legit` 却同时声明 `variants: [normal, boundary, exception]`。catalog 因此只声明变体，tier 一律由变体推导。相应地，catalog 模型开启 `extra="forbid"`，YAML 里残留的 `tier:` 键会在加载期直接报错，而不是被静默忽略。
 
@@ -1173,12 +1174,13 @@ EOF
 
 | 布局名 | 功能码 | 请求字段 | 响应字段 |
 |---|---|---|---|
-| `fc01` / `fc02` / `fc03` / `fc04` | 0x01–0x04 | start_addr u16, quantity u16 | byte_count u8(count_of values, adjust×2), values u16(count_from byte_count, len_from_request quantity) |
+| `fc01` / `fc02` | 0x01–0x02 | start_addr u16, quantity u16 | byte_count u8(count_of values), values bytes(count_from byte_count, len_from_request quantity, len_adjust ÷8 向上取整) |
+| `fc03` / `fc04` | 0x03–0x04 | start_addr u16, quantity u16 | byte_count u8(count_of values, adjust×2), values u16(count_from byte_count, len_from_request quantity) |
 | `fc05` / `fc06` | 0x05–0x06 | start_addr u16, value u16 | 同请求 |
 | `fc07` | 0x07 | 无 | status u8 |
 | `fc08` | 0x08 | sub_function u16, data u16 | 同请求 |
 | `fc0b` | 0x0B | 无 | status u16, event_count u16 |
-| `fc0c` | 0x0C | 无 | status u16, event_count u16, message_count u16, event_log_count u8(count_of log), log u16(count_from event_log_count, count_is_elements) |
+| `fc0c` | 0x0C | 无 | byte_count u8(count_of events, adjust+6), status u16, event_count u16, message_count u16, events bytes(count_from byte_count, count_adjust−6) |
 | `fc0f` | 0x0F | start_addr u16, quantity u16, byte_count u8(count_of values), values bytes(count_from byte_count) | start_addr u16, quantity u16 |
 | `fc10` | 0x10 | start_addr u16, quantity u16, byte_count u8(count_of values, adjust×2), values u16(count_from byte_count) | start_addr u16, quantity u16 |
 | `fc11` | 0x11 | 无 | byte_count u8(count_of slave_id, adjust+1), slave_id bytes(count_from byte_count, count_adjust−1), run_indicator_status u8 |
@@ -1189,7 +1191,7 @@ EOF
 | `fc18` | 0x18 | fifo_pointer_address u16 | byte_count u16(count_of fifo_values, adjust×2+2), fifo_count u16(count_of fifo_values), fifo_values u16(count_from fifo_count, count_is_elements) |
 | `fc2b` | 0x2B | mei_type u8, read_device_id_code u8, object_id u8 | mei_type u8, read_device_id_code u8, conformity_level u8, more_follows u8, next_object_id u8, number_of_objects u8, object_id u8, object_size u8(count_of object_value), object_value bytes(count_from object_size) |
 
-> 规范说明：`0x12` 是保留空档（`0x11` 与 `0x14` 之间），不存在「读文件记录」功能码 —— 读文件记录是 `0x14`，写文件记录是 `0x15`。FC0x16 是掩码写寄存器（start_addr + and_mask + or_mask），FC0x17 的响应与 FC0x03 同构（byte_count + 寄存器数组），FC0x18 的响应是 byte_count + fifo_count + FIFO 数据。
+> 规范说明：`0x12` 是保留空档（`0x11` 与 `0x14` 之间），不存在「读文件记录」功能码 —— 读文件记录是 `0x14`，写文件记录是 `0x15`。FC0x01 / FC0x02 的响应数据**按位打包**（每 8 个线圈 1 字节），FC0x03 / FC0x04 是每寄存器 2 字节，两者布局不共用。FC0x0C 的响应是 `byte_count(6 + 事件字节数) + status + event_count + message_count + 事件字节`（每条事件 1 字节）。FC0x16 是掩码写寄存器（start_addr + and_mask + or_mask），FC0x17 的响应与 FC0x03 同构（byte_count + 寄存器数组），FC0x18 的响应是 byte_count + fifo_count + FIFO 数据。
 
 **操作类型构成**（41 个 = 规范功能码 17 + MEI 2 + 诊断子功能 21 + 协议级异常 1）：
 
@@ -1354,17 +1356,28 @@ def test_fc11_report_slave_id_length():
     }
 
 
-def test_fc0c_event_log_count_is_element_count():
-    """FC0C 的 event_log_count 是事件条数，不是字节数。"""
+def test_fc0c_response_matches_spec():
+    """FC0C 响应 = byte_count(6 + 事件字节数) + status + event_count + message_count + 事件字节。"""
     layout = get_layout("fc0c")
-    raw = encode(layout.response, {"log": [0x0001, 0x0002]})
-    assert raw == b"\x00\x00\x00\x00\x00\x00\x02\x00\x01\x00\x02"
+    raw = encode(layout.response, {"events": b"\x21\x20"})
+    assert raw == b"\x08\x00\x00\x00\x00\x00\x00\x21\x20"
     assert decode(layout.response, raw) == {
+        "byte_count": 8,
         "status": 0,
         "event_count": 0,
         "message_count": 0,
-        "event_log_count": 2,
-        "log": [1, 2],
+        "events": b"\x21\x20",
+    }
+
+
+def test_fc01_response_is_bit_packed():
+    """FC01 响应数据按位打包：8 个线圈 = 1 字节，不是每线圈 2 字节。"""
+    layout = get_layout("fc01")
+    raw = encode(layout.response, {"values": b"\x05"})
+    assert raw == b"\x01\x05"
+    assert decode(layout.response, raw) == {
+        "byte_count": 1,
+        "values": b"\x05",
     }
 
 
@@ -1520,7 +1533,7 @@ Expected: FAIL —— `ModuleNotFoundError: No module named 'icsgen.protocols'`
 
 创建 `icsgen/protocols/__init__.py` 与 `icsgen/protocols/modbus/__init__.py`（空文件）。
 
-**（1）扩展 `icsgen/codec/fields.py` 的 `Field`**，新增两个长度换算开关：
+**（1）扩展 `icsgen/codec/fields.py` 的 `Field`**，新增三个长度换算开关：
 
 ```python
 @dataclass(frozen=True)
@@ -1530,6 +1543,8 @@ class Field:
     count_of:  编码时本字段的值由被引用字段的元素个数决定（被引用字段是数组时取其长度）
     count_from: 解码时本字段是变长数组，元素个数由被引用字段的值除以本字段类型宽度得出
     len_from_request: 构造响应时本数组的元素个数取自请求中的该参数，仅用于构造
+    len_adjust: 构造响应时元素个数的线性修正，例如 Modbus FC0x01 的响应数据按位打包，
+                字节数是线圈数向上取整除以 8
     count_is_elements: 被引用字段给出的是元素个数而非字节数时置真，解码不再除以元素宽度
     count_adjust: 元素个数换算后的线性修正，例如 Modbus FC0x15 的记录长度以寄存器计，
                   字节数是它的两倍
@@ -1542,6 +1557,7 @@ class Field:
     count_of: str | None = None
     count_from: str | None = None
     len_from_request: str | None = None
+    len_adjust: Callable[[int], int] | None = None
     count_is_elements: bool = False
     count_adjust: Callable[[int], int] | None = None
     adjust: Callable[[int], int] | None = None
@@ -1749,7 +1765,23 @@ DIAGNOSTIC_SUBFUNCTIONS: dict[int, str] = {
     0x0018: "Clear I/O Overrun Counter and Flag",
 }
 
-_READ_LAYOUT = Layout(
+#: FC0x01 / FC0x02 读位：响应数据按位打包，每 8 个线圈 1 字节
+_BIT_READ_LAYOUT = Layout(
+    request=(Field("start_addr", "uint16"), Field("quantity", "uint16")),
+    response=(
+        Field("byte_count", "uint8", count_of="values"),
+        Field(
+            "values",
+            "bytes",
+            count_from="byte_count",
+            len_from_request="quantity",
+            len_adjust=lambda n: (n + 7) // 8,
+        ),
+    ),
+)
+
+#: FC0x03 / FC0x04 读寄存器：响应数据每寄存器 2 字节
+_REGISTER_READ_LAYOUT = Layout(
     request=(Field("start_addr", "uint16"), Field("quantity", "uint16")),
     response=(
         Field("byte_count", "uint8", count_of="values", adjust=lambda n: n * 2),
@@ -1803,10 +1835,10 @@ _FILE_WRITE_FIELDS = (
 )
 
 LAYOUTS: dict[str, Layout] = {
-    "fc01": _READ_LAYOUT,
-    "fc02": _READ_LAYOUT,
-    "fc03": _READ_LAYOUT,
-    "fc04": _READ_LAYOUT,
+    "fc01": _BIT_READ_LAYOUT,
+    "fc02": _BIT_READ_LAYOUT,
+    "fc03": _REGISTER_READ_LAYOUT,
+    "fc04": _REGISTER_READ_LAYOUT,
     "fc05": _WRITE_SINGLE_LAYOUT,
     "fc06": _WRITE_SINGLE_LAYOUT,
     "fc07": Layout(request=(), response=(Field("status", "uint8"),)),
@@ -1821,11 +1853,11 @@ LAYOUTS: dict[str, Layout] = {
     "fc0c": Layout(
         request=(),
         response=(
-            Field("status", "uint16"),
-            Field("event_count", "uint16"),
-            Field("message_count", "uint16"),
-            Field("event_log_count", "uint8", count_of="log"),
-            Field("log", "uint16", count_from="event_log_count", count_is_elements=True, default=(0,)),
+            Field("byte_count", "uint8", count_of="events", adjust=lambda n: n + 6),
+            Field("status", "uint16", default=0),
+            Field("event_count", "uint16", default=0),
+            Field("message_count", "uint16", default=0),
+            Field("events", "bytes", count_from="byte_count", count_adjust=lambda n: n - 6),
         ),
     ),
     "fc0f": Layout(
@@ -1990,7 +2022,7 @@ operations:
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python3 -m pytest tests/test_modbus_layouts.py tests/test_codec.py -v`
-Expected: PASS —— 26 + 18 = 44 passed
+Expected: PASS —— 27 + 18 = 45 passed
 
 - [ ] **Step 5: 提交**
 
@@ -2023,6 +2055,7 @@ EOF
 
 **Interfaces:**
 - Consumes: `icsgen.codec.fields.Layout`、`icsgen.protocols.modbus.layouts.get_layout`（Task 4）、`icsgen.spec.model.Variant`（Task 1）
+- 注意：Task 4 给 `Field` 加了 `len_adjust`（构造路径上的元素个数修正），本任务的 `_element_count` 必须区分「来自请求」与「来自长度字段」两条路径 —— 前者用 `len_adjust`，后者用 `count_adjust`。
 - Produces:
   - `icsgen.protocols.modbus.variants.VariantPlan`：`frozen dataclass`，字段 `func_code: int`、`request_values: dict[str, Any]`、`response_values: dict[str, Any]`、`is_exception: bool`、`metadata: dict[str, Any]`
   - `icsgen.protocols.modbus.variants.plan_variant(layout: Layout, op_name: str, func_code: int, params: dict[str, Any], variant: Variant, maxima: dict[str, int] | None = None) -> VariantPlan`
@@ -2120,6 +2153,14 @@ def test_response_byte_count_matches_value_count():
     assert len(plan.response_values["values"]) == 3
 
 
+def test_bit_read_response_is_packed_to_bytes():
+    """FC01 响应数据按位打包：9 个线圈占 2 字节，不是 9 字节。"""
+    layout = get_layout("fc01")
+    plan = plan_variant(layout, "modbus.read_coils", 1, {"quantity": 9}, Variant.NORMAL)
+    assert plan.response_values["byte_count"] == 2
+    assert plan.response_values["values"] == b"\x00\x00"
+
+
 def test_boundary_plan_pushes_array_elements_to_maximum():
     """边界变体把数组参数的每个元素都顶到元素上界。"""
     layout = get_layout("fc10")
@@ -2201,14 +2242,20 @@ def _default_for(f: Field) -> Any:
     return 0
 
 
-def _element_count(f: Field, raw: int) -> int:
+def _element_count(f: Field, raw: int, from_request: bool = False) -> int:
     """把长度来源换算成元素个数。
 
-    ``len_from_request`` 给出的已经是元素个数；``count_from`` 给出的通常是
-    字节计数，要除以元素宽度（bytes 型宽度为 1，除法无影响）。
+    ``len_from_request`` 给出的已经是元素个数，再经 ``len_adjust`` 修正
+    （FC01 的响应数据按位打包，字节数是线圈数 ÷ 8 向上取整）；
+    ``count_from`` 给出的通常是字节计数，要除以元素宽度
+    （bytes 型宽度为 1，除法无影响），再经 ``count_adjust`` 修正。
     """
     count = int(raw)
-    if f.len_from_request is None and not f.count_is_elements:
+    if from_request:
+        if f.len_adjust is not None:
+            count = f.len_adjust(count)
+        return count
+    if not f.count_is_elements:
         count = count // (2 if f.type == "uint16" else 1)
     if f.count_adjust is not None:
         count = f.count_adjust(count)
@@ -2311,7 +2358,7 @@ def _build_response(layout: Layout, request_values: dict[str, Any]) -> dict[str,
             # 长度来源不可得（它本身由数组长度推出），退回字段缺省值
             values[f.name] = f.default if f.default is not None else _default_for(f)
             continue
-        count = _element_count(f, raw)
+        count = _element_count(f, raw, from_request=f.len_from_request is not None)
         values[f.name] = b"\x00" * count if f.type == "bytes" else [0] * count
 
     # 第二遍：普通字段
@@ -2391,7 +2438,7 @@ def plan_variant(
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python3 -m pytest tests/test_modbus_variants.py -v`
-Expected: PASS —— 9 passed
+Expected: PASS —— 10 passed
 
 - [ ] **Step 5: 提交**
 
