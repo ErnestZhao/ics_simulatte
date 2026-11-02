@@ -13,7 +13,7 @@ from typing import Any
 import yaml
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class OperationEntry(BaseModel):
@@ -22,12 +22,17 @@ class OperationEntry(BaseModel):
     params 是「参数名 -> 该参数的 JSON Schema 片段」的映射；其中的 default
     键仅作文档说明，参数缺省值由字段布局的 Field.default 决定，加载时不会
     自动填充。
+
+    本条目不声明 tier：语义层由变体唯一决定（icsgen.spec.model.VARIANT_TIER），
+    catalog 再声明一个 tier 会成为第二事实源，且对同时含合法变体与异常变体的
+    操作类型必然自相矛盾。
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     name: str
     summary: str = ""
     layout: str
-    tier: str = "legit"
     variants: list[str] = Field(default_factory=lambda: ["normal"])
     params: dict[str, Any] = Field(default_factory=dict)
     func_code: int | None = None
@@ -35,6 +40,8 @@ class OperationEntry(BaseModel):
 
 class CatalogModel(BaseModel):
     """catalog.yaml 的结构。"""
+
+    model_config = ConfigDict(extra="forbid")
 
     protocol: str
     transports: list[str] = Field(default_factory=lambda: ["tcp"])

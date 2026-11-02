@@ -95,3 +95,45 @@ def test_decode_unknown_type_raises():
     fields = (Field("n", "uint8"), Field("weird", "uint64", count_from="n"))
     with pytest.raises(DecodeError, match="未知字段类型"):
         decode(fields, b"\x02\x00")
+
+
+def test_decode_count_is_elements_keeps_count():
+    """被引用字段给出的是元素个数时不再除以元素宽度。"""
+    fields = (
+        Field("fifo_count", "uint16"),
+        Field("fifo_values", "uint16", count_from="fifo_count", count_is_elements=True),
+    )
+    assert decode(fields, b"\x00\x03\x00\x01\x00\x02\x00\x03") == {
+        "fifo_count": 3,
+        "fifo_values": [1, 2, 3],
+    }
+
+
+def test_decode_count_adjust_transforms_element_count():
+    """count_adjust 在换算后对元素个数做一次修正。"""
+    fields = (
+        Field("record_length", "uint16"),
+        Field("record_data", "bytes", count_from="record_length", count_adjust=lambda n: n * 2),
+    )
+    assert decode(fields, b"\x00\x02\x00\x01\x00\x02") == {
+        "record_length": 2,
+        "record_data": b"\x00\x01\x00\x02",
+    }
+
+
+def test_encode_count_of_falls_back_to_referenced_default():
+    """被引用数组没有取值时，长度字段按被引用字段的缺省值计算。"""
+    fields = (
+        Field("byte_count", "uint8", count_of="data", adjust=lambda n: n + 1),
+        Field("data", "bytes", count_from="byte_count", default=b"\x01\x02"),
+    )
+    assert encode(fields, {}) == b"\x03\x01\x02"
+
+
+def test_encode_count_from_falls_back_to_field_default():
+    """数组字段没有取值时用字段缺省值。"""
+    fields = (
+        Field("byte_count", "uint8", count_of="data"),
+        Field("data", "bytes", count_from="byte_count", default=b"\x01\x02"),
+    )
+    assert encode(fields, {}) == b"\x02\x01\x02"

@@ -1,7 +1,12 @@
 """Modbus 功能码的字段布局。
 
 布局描述请求与响应 PDU 的字节结构（不含功能码字节本身，功能码由适配器
-单独拼装）。诊断子功能的 21 个变体共享 fc08 布局，仅子功能码默认值不同。
+单独拼装）。字段结构对照 Modbus Application Protocol Specification V1.1b3；
+长度字段的换算关系由 Field 的 count_of / count_from / adjust /
+count_is_elements / count_adjust 声明。
+
+诊断子功能的 21 个子功能各自是一个操作类型，共享 fc08 布局，仅子功能码
+默认值不同。
 """
 
 from __future__ import annotations
@@ -46,18 +51,44 @@ _WRITE_SINGLE_LAYOUT = Layout(
     response=(Field("start_addr", "uint16"), Field("value", "uint16")),
 )
 
-_FILE_REQUEST_FIELDS = (
-    Field("reference_type", "uint16"),
-    Field("file_number", "uint16"),
-    Field("record_number", "uint16"),
-    Field("record_length", "uint16"),
+#: FC0x14 读文件记录请求：byte_count(7) + 引用类型 + 文件号 + 记录号 + 记录长度
+_FILE_READ_REQUEST_FIELDS = (
+    Field("byte_count", "uint8", default=7),
+    Field("reference_type", "uint8", default=0x06),
+    Field("file_number", "uint16", default=0),
+    Field("record_number", "uint16", default=0),
+    Field("record_length", "uint16", default=1),
 )
 
-_FILE_RESPONSE_FIELDS = (
-    Field("file_response_length", "uint16"),
-    Field("reference_type", "uint16"),
-    Field("file_number", "uint16"),
-    Field("record_number", "uint16"),
+#: FC0x14 读文件记录响应：两个长度字段都由记录数据长度推出
+_FILE_READ_RESPONSE_FIELDS = (
+    Field("byte_count", "uint8", count_of="record_data", adjust=lambda n: n + 2),
+    Field("file_response_length", "uint8", count_of="record_data", adjust=lambda n: n + 1),
+    Field("reference_type", "uint8", default=0x06),
+    Field(
+        "record_data",
+        "bytes",
+        count_from="file_response_length",
+        count_adjust=lambda n: n - 1,
+        default=b"\x00\x01\x00\x02",
+    ),
+)
+
+#: FC0x15 写文件记录：请求与响应同构（响应是请求的回显）
+_FILE_WRITE_FIELDS = (
+    Field("byte_count", "uint8", count_of="record_data", adjust=lambda n: n + 7),
+    Field("reference_type", "uint8", default=0x06),
+    Field("file_number", "uint16", default=0),
+    Field("record_number", "uint16", default=0),
+    Field("record_length", "uint16", count_of="record_data", adjust=lambda n: n // 2),
+    Field(
+        "record_data",
+        "bytes",
+        count_from="record_length",
+        count_is_elements=True,
+        count_adjust=lambda n: n * 2,
+        default=b"\x00\x01\x00\x02",
+    ),
 )
 
 LAYOUTS: dict[str, Layout] = {
@@ -79,12 +110,11 @@ LAYOUTS: dict[str, Layout] = {
     "fc0c": Layout(
         request=(),
         response=(
-            Field("status", "uint16"),
-            Field("event_count", "uint16"),
-            Field("message_count", "uint16"),
-            Field("event_log_count", "uint16"),
-            Field("log_length", "uint8", count_of="log"),
-            Field("log", "bytes", count_from="log_length"),
+            Field("status", "uint16", default=0),
+            Field("event_count", "uint16", default=0),
+            Field("message_count", "uint16", default=0),
+            Field("event_log_count", "uint8", count_of="log"),
+            Field("log", "uint16", count_from="event_log_count", count_is_elements=True, default=(0,)),
         ),
     ),
     "fc0f": Layout(
@@ -108,35 +138,36 @@ LAYOUTS: dict[str, Layout] = {
     "fc11": Layout(
         request=(),
         response=(
-            Field("byte_count", "uint8", count_of="slave_id"),
-            Field("slave_id", "bytes", count_from="byte_count"),
-        ),
-    ),
-    "fc12": Layout(
-        request=_FILE_REQUEST_FIELDS,
-        response=_FILE_RESPONSE_FIELDS
-        + (
-            Field("record_data_length", "uint16"),
-            Field("data_length", "uint16"),
-            Field("data", "bytes", count_from="data_length"),
+            Field("byte_count", "uint8", count_of="slave_id", adjust=lambda n: n + 1),
+            Field(
+                "slave_id",
+                "bytes",
+                count_from="byte_count",
+                count_adjust=lambda n: n - 1,
+                default=b"Pymodbus",
+            ),
+            Field("run_indicator_status", "uint8", default=0xFF),
         ),
     ),
     "fc14": Layout(
-        request=_FILE_REQUEST_FIELDS,
-        response=_FILE_RESPONSE_FIELDS
-        + (
-            Field("record_data_length", "uint16"),
-            Field("data_length", "uint16"),
-            Field("data", "bytes", count_from="data_length"),
-        ),
+        request=_FILE_READ_REQUEST_FIELDS,
+        response=_FILE_READ_RESPONSE_FIELDS,
     ),
     "fc15": Layout(
-        request=_FILE_REQUEST_FIELDS,
-        response=_FILE_RESPONSE_FIELDS + (Field("record_length", "uint16"),),
+        request=_FILE_WRITE_FIELDS,
+        response=_FILE_WRITE_FIELDS,
     ),
     "fc16": Layout(
-        request=(Field("mask", "uint16"), Field("value", "uint16")),
-        response=(Field("mask", "uint16"), Field("value", "uint16")),
+        request=(
+            Field("start_addr", "uint16"),
+            Field("and_mask", "uint16"),
+            Field("or_mask", "uint16"),
+        ),
+        response=(
+            Field("start_addr", "uint16"),
+            Field("and_mask", "uint16"),
+            Field("or_mask", "uint16"),
+        ),
     ),
     "fc17": Layout(
         request=(
@@ -145,44 +176,37 @@ LAYOUTS: dict[str, Layout] = {
             Field("write_addr", "uint16"),
             Field("write_quantity", "uint16"),
             Field("write_byte_count", "uint8", count_of="write_values", adjust=lambda n: n * 2),
-            Field("write_values", "uint16", count_from="write_byte_count", len_from_request="write_quantity"),
-            Field("read_byte_count", "uint8", count_of="read_values", adjust=lambda n: n * 2),
-            Field("read_values", "uint16", count_from="read_byte_count", len_from_request="read_quantity"),
+            Field("write_values", "uint16", count_from="write_byte_count"),
         ),
         response=(
-            Field("read_addr", "uint16"),
-            Field("read_quantity", "uint16"),
-            Field("write_addr", "uint16"),
-            Field("write_quantity", "uint16"),
-            Field("write_byte_count", "uint8", count_of="write_values", adjust=lambda n: n * 2),
-            Field("write_values", "uint16", count_from="write_byte_count", len_from_request="write_quantity"),
-            Field("read_byte_count", "uint8", count_of="read_values", adjust=lambda n: n * 2),
-            Field("read_values", "uint16", count_from="read_byte_count", len_from_request="read_quantity"),
+            Field("byte_count", "uint8", count_of="values", adjust=lambda n: n * 2),
+            Field("values", "uint16", count_from="byte_count", len_from_request="read_quantity"),
         ),
     ),
     "fc18": Layout(
-        request=(),
+        request=(Field("fifo_pointer_address", "uint16"),),
         response=(
-            Field("byte_count", "uint16", count_of="fifo_values"),
-            Field("fifo_values", "uint16", count_from="byte_count"),
+            Field("byte_count", "uint16", count_of="fifo_values", adjust=lambda n: n * 2 + 2),
+            Field("fifo_count", "uint16", count_of="fifo_values"),
+            Field("fifo_values", "uint16", count_from="fifo_count", count_is_elements=True, default=(0, 1, 2, 3)),
         ),
     ),
     "fc2b": Layout(
         request=(
-            Field("mei_type", "uint8"),
-            Field("read_device_id_code", "uint8"),
-            Field("object_id", "uint8"),
+            Field("mei_type", "uint8", default=0x0E),
+            Field("read_device_id_code", "uint8", default=0x01),
+            Field("object_id", "uint8", default=0x00),
         ),
         response=(
-            Field("mei_type", "uint8"),
-            Field("read_device_id_code", "uint8"),
-            Field("conformity_level", "uint8"),
-            Field("more_follows", "uint8"),
-            Field("next_object_id", "uint8"),
-            Field("number_of_objects", "uint8"),
-            Field("object_id", "uint8"),
-            Field("object_size", "uint8"),
-            Field("object_value", "bytes", count_from="object_size"),
+            Field("mei_type", "uint8", default=0x0E),
+            Field("read_device_id_code", "uint8", default=0x01),
+            Field("conformity_level", "uint8", default=0x83),
+            Field("more_follows", "uint8", default=0x00),
+            Field("next_object_id", "uint8", default=0x00),
+            Field("number_of_objects", "uint8", default=0x01),
+            Field("object_id", "uint8", default=0x00),
+            Field("object_size", "uint8", count_of="object_value"),
+            Field("object_value", "bytes", count_from="object_size", default=b"\x01\x02"),
         ),
     ),
 }

@@ -29,6 +29,7 @@ def decode(fields: tuple[Field, ...], data: bytes, offset: int = 0) -> dict[str,
     """按 fields 声明把 data 解码成取值字典。
 
     count_from 字段的元素个数 = 被引用字段的值 ÷ 本字段类型宽度；
+    被引用字段声明 count_is_elements 时不再除以宽度，count_adjust 再做一次修正。
     count_of 字段在解码时按普通定长字段处理。
     bytes 类型的变长字段解码为连续的 bytes 对象，与编码器对称。
     """
@@ -41,7 +42,12 @@ def decode(fields: tuple[Field, ...], data: bytes, offset: int = 0) -> dict[str,
             width = FIELD_SIZES.get(f.type)
             if width is None:
                 raise DecodeError(f"未知字段类型 {f.type!r}")
-            count = int(referenced) // width
+            count = int(referenced)
+            if not f.count_is_elements:
+                # 引用值是字节计数时换算成元素个数
+                count = count // width
+            if f.count_adjust is not None:
+                count = f.count_adjust(count)
             if f.type == "bytes":
                 # bytes 类型宽度为 1，长度即字节数，直接切片返回连续字节串
                 if offset + count > len(data):
