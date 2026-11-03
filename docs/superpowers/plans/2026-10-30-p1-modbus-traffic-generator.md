@@ -3905,7 +3905,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Sequence
 
 
 @dataclass(frozen=True)
@@ -3915,6 +3915,16 @@ class MutationRule:
     name: str
     description: str
     apply: Callable[[bytes, random.Random], bytes | None]
+
+
+def _different_value(current: int, rng: random.Random, candidates: Sequence[int]) -> int:
+    """从候选值里挑一个与 current 不同的值。
+
+    变异规则必须真的改变字节 —— 若写回的值与原值相同，引擎会把它当作
+    「没有变化」丢弃，这条规则就等于没生效。因此凡是「写某个字节」的
+    规则都要先排除原值。
+    """
+    return rng.choice([value for value in candidates if value != current])
 
 
 def _bit_flip(data: bytes, rng: random.Random) -> bytes | None:
@@ -3939,7 +3949,8 @@ def _byte_set(data: bytes, rng: random.Random) -> bytes | None:
     if not data:
         return None
     buf = bytearray(data)
-    buf[rng.randrange(len(buf))] = rng.randrange(256)
+    index = rng.randrange(len(buf))
+    buf[index] = _different_value(buf[index], rng, range(256))
     return bytes(buf)
 
 
@@ -3959,8 +3970,9 @@ def _length_field_corrupt(data: bytes, rng: random.Random) -> bytes | None:
     if len(data) < 6:
         return None
     buf = bytearray(data)
-    buf[4] = rng.randrange(256)
-    buf[5] = rng.randrange(256)
+    current = int.from_bytes(buf[4:6], "big")
+    value = _different_value(current, rng, range(0x10000))
+    buf[4:6] = value.to_bytes(2, "big")
     return bytes(buf)
 
 
@@ -3969,7 +3981,7 @@ def _func_code_corrupt(data: bytes, rng: random.Random) -> bytes | None:
     if not data:
         return None
     buf = bytearray(data)
-    buf[0] = rng.randrange(1, 256)
+    buf[0] = _different_value(buf[0], rng, range(1, 256))
     return bytes(buf)
 
 
@@ -3978,8 +3990,9 @@ def _address_corrupt(data: bytes, rng: random.Random) -> bytes | None:
     if len(data) < 4:
         return None
     buf = bytearray(data)
-    buf[2] = rng.randrange(256)
-    buf[3] = rng.randrange(256)
+    current = int.from_bytes(buf[2:4], "big")
+    value = _different_value(current, rng, range(0x10000))
+    buf[2:4] = value.to_bytes(2, "big")
     return bytes(buf)
 
 
@@ -3988,7 +4001,8 @@ def _value_extreme(data: bytes, rng: random.Random) -> bytes | None:
     if not data:
         return None
     buf = bytearray(data)
-    buf[rng.randrange(len(buf))] = rng.choice([0x00, 0xFF, 0x7F, 0x80])
+    index = rng.randrange(len(buf))
+    buf[index] = _different_value(buf[index], rng, (0x00, 0xFF, 0x7F, 0x80))
     return bytes(buf)
 
 
@@ -4105,7 +4119,7 @@ def _first_difference(original: bytes, mutated: bytes) -> int:
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `python3 -m pytest tests/test_mutate.py -v`
-Expected: PASS —— 8 passed
+Expected: PASS —— 9 passed
 
 - [ ] **Step 5: 提交**
 
@@ -5502,6 +5516,7 @@ EOF
 3. 响应数组的长度无法从请求字段直接推导（FC03 响应的 values 会算成 0 个元素）—— 已给 `Field` 增加 `len_from_request` 声明，并把 `_build_response` 改为两遍处理（先数组、后长度字段）。
 4. **请求内数组的长度必须跟随同帧的计数标量** —— FC0F/FC10/FC17 的请求数组与长度字段互为环状引用，唯一不自相矛盾的依据是同帧的计数标量（`quantity` / `write_quantity`）。布局用 `len_from_request` 声明这条协议结构关系，变体层把数组对齐到计数标量推出的长度（不足补零、超出截断）。**字节布局不变** —— 编解码内核不读这两个字段。
 5. **计划原本只产请求帧，没有响应帧** —— 与 spec §7「异常响应作为独立 variant 生成」、§11.1「请求+响应连续」、§16「验证请求-响应成对」矛盾，且 Task 9 的文档字符串已宣称「保持会话内请求/响应连续」。已补上响应路径：Task 7 的 `TransportSpec.reversed()`、Task 9 的 `Artifact.response` 与 `pcap_resp_index`、Task 11 的 `ModbusAdapter.build_response`。**一次操作仍 = 一个 Artifact**，覆盖度计数不变。
+6. **写字节的变异规则可能写出与原值相同的字节** —— 引擎有 `mutated == payload` 的丢弃逻辑，于是「规则没生效」会变成**静默的空结果**（`byte_set` 命中 1/256、`func_code_corrupt` 命中 1/255、两个 16 位字段各命中 1/65536），测试 `test_every_rule_produces_a_mutation` 会随机失败。已引入 `_different_value(current, rng, candidates)`，凡是写字节的规则都先从候选值里排除原值再写回。
 
 **遗留说明**：`duplicate_replay` 与 `interleave_frames` 在 P1 保持"单帧不适用"，成对帧的变异留待 P2 起引入多帧场景后实现；届时需同步更新 Task 10 的测试与 `icsgen.mutate` 的输入接口（当前只接受单帧字节）。
 
