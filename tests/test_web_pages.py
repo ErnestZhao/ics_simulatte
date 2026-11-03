@@ -44,7 +44,7 @@ def test_workbench_lists_protocol_and_operations(tmp_path):
     client = _client(tmp_path)
     body = client.get("/").text
     assert "modbus" in body
-    assert "41" in body
+    assert "41 个操作类型" in body
     assert "/static/app.js" in body
 
 

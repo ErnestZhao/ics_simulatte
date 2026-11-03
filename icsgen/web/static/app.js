@@ -96,7 +96,9 @@
       const schema = op.params || {};
       for (const name of Object.keys(schema)) {
         if (schema[name].default !== undefined) {
-          params[name] = schema[name].default;
+          // 数组默认值要拷贝 —— 直接存引用会让页面内的原地修改污染共享 schema。
+          const d = schema[name].default;
+          params[name] = Array.isArray(d) ? d.slice() : d;
         }
       }
       return params;
@@ -306,7 +308,11 @@
     }
 
     document.querySelectorAll("[data-artifact]").forEach(function (row) {
-      row.addEventListener("click", async function () {
+      row.addEventListener("click", async function (event) {
+        // 下载链接在行内，点击它不应再触发一次产物详情请求。
+        if (event.target.closest("a")) {
+          return;
+        }
         // 产物 id 里有 '#'，必须编码 —— 否则浏览器把它当 fragment 丢掉。
         const response = await fetch(
           "/api/generations/" + id + "/artifacts/" + encodeURIComponent(row.dataset.artifact)
