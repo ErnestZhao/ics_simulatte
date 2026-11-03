@@ -174,3 +174,55 @@ def test_dataset_pairs_request_and_response(tmp_path):
     assert entry["resp_len"] > 0
     frames = root / "legit" / "modbus_tcp" / "frames"
     assert (frames / f"{entry['id']}.resp.bin").exists()
+
+
+def test_progress_callback_reports_every_interaction(tmp_path):
+    from icsgen.spec.model import Operation
+
+    adapter = load_modbus_adapter()
+    scenario = Scenario(
+        name="demo",
+        transport={"kind": "tcp"},
+        operations=(
+            Operation(op="modbus.read_holding_registers", params={"quantity": 3}),
+            Operation(op="modbus.write_multiple_registers", params={"quantity": 2}),
+        ),
+    )
+    seen = []
+    build_dataset(
+        scenario, adapter, tmp_path / "ds", name="demo",
+        on_progress=lambda done, total: seen.append((done, total)),
+    )
+    assert seen == [(1, 2), (2, 2)]
+
+
+def test_transaction_id_wraps_after_65536(tmp_path):
+    """交互数量放开后事务 id 会越过 2 字节，必须取模而不是崩掉。"""
+    from icsgen.protocols.base import ProtocolFrame
+    from icsgen.spec.model import Operation
+
+    captured = []
+
+    class RecordingAdapter:
+        name = "modbus"
+
+        def build(self, op, ctx):
+            captured.append(ctx.transaction_id)
+            return ProtocolFrame(payload=b"\x00\x01")
+
+        def build_response(self, op, ctx):
+            return None
+
+    scenario = Scenario(
+        name="demo",
+        transport={"kind": "tcp"},
+        operations=tuple(
+            Operation(op="modbus.read_holding_registers", params={"quantity": 1})
+            for _ in range(65538)
+        ),
+    )
+    build_dataset(scenario, RecordingAdapter(), tmp_path / "ds", name="demo")
+    assert len(captured) == 65538
+    assert captured[65536] == 0
+    assert captured[65537] == 1
+    assert max(captured) <= 0xFFFF

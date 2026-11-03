@@ -9,7 +9,7 @@ from icsgen.transport.link import encapsulate
 from icsgen.transport.spec import TransportSpec
 
 
-def _artifact(op="modbus.read_holding_registers", tier="legit", payload=b"\x01\x02", transport="tcp"):
+def _artifact(op="modbus.read_holding_registers", tier="legit", payload=b"\x01\x02", transport="tcp", response=None):
     return Artifact(
         id=f"{op}#001",
         protocol="modbus",
@@ -18,6 +18,7 @@ def _artifact(op="modbus.read_holding_registers", tier="legit", payload=b"\x01\x
         variant="normal",
         tier=tier,
         payload=payload,
+        response=response,
         metadata={"fc": 3},
     )
 
@@ -198,3 +199,27 @@ def test_serial_session_is_recorded_as_linux_sll(tmp_path):
     data = (root / "legit" / "modbus_rtu" / "session.pcap").read_bytes()
     assert int.from_bytes(data[20:24], "little") == 113
     assert b"\x11\x03" in data
+
+
+def test_unregistered_artifact_id_is_rejected(tmp_path):
+    """挂载未登记的产物 id 时报错，不静默丢弃链路字节。"""
+    builder = DatasetBuilder("demo", tmp_path / "ds")
+    with pytest.raises(KeyError):
+        builder.add_linked_packets(
+            "modbus.read_holding_registers#001",
+            [encapsulate(b"\x01", TransportSpec())],
+        )
+
+
+def test_duplicate_artifact_id_keeps_first_registration(tmp_path):
+    """同 id 重复登记时，挂载链路字节按先登记的产物算帧数。"""
+    builder = DatasetBuilder("demo", tmp_path / "ds")
+    # 先登记的没有响应，后登记的有响应
+    builder.add(_artifact(payload=b"\x01"))
+    builder.add(_artifact(payload=b"\x02", response=b"\x03"))
+    # 先登记的产物只有 1 帧，因此挂 2 个包应报帧数不符
+    with pytest.raises(ValueError):
+        builder.add_linked_packets(
+            "modbus.read_holding_registers#001",
+            [encapsulate(b"\x01", TransportSpec()), encapsulate(b"\x02", TransportSpec())],
+        )

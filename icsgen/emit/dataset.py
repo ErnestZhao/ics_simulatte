@@ -77,6 +77,7 @@ class DatasetBuilder:
         self.root = root
         self.transport = transport
         self.artifacts: list[Artifact] = []
+        self._by_id: dict[str, Artifact] = {}
         self._packets: dict[str, list[bytes]] = {}
         self._positions: dict[str, tuple[str, int]] = {}
         self._response_positions: dict[str, tuple[str, int]] = {}
@@ -84,6 +85,8 @@ class DatasetBuilder:
     def add(self, artifact: Artifact) -> None:
         """登记一条产物。"""
         self.artifacts.append(artifact)
+        # 同 id 重复登记时以先登记的为准
+        self._by_id.setdefault(artifact.id, artifact)
 
     def add_linked_packets(self, artifact_id: str, packets: list[bytes]) -> None:
         """把链路字节挂到它所属的 (tier, transport) 会话中。
@@ -93,7 +96,7 @@ class DatasetBuilder:
         请求，次个是响应，其后是追加帧。挂载时即记录各自在会话中的包
         序号，供 manifest 索引。
         """
-        artifact = next((a for a in self.artifacts if a.id == artifact_id), None)
+        artifact = self._by_id.get(artifact_id)
         if artifact is None:
             raise KeyError(f"未登记的产物 id：{artifact_id!r}")
         if not packets:
