@@ -12,12 +12,14 @@ from typing import Any
 
 import typer
 
-from .emit.dataset import Artifact, DatasetBuilder
+from .emit.dataset import Artifact, DatasetBuilder, frame_roles
 from .generator import build_dataset
-from .mutate.engine import mutate
+from .mutate.engine import mutate_frames
 from .protocols.modbus.adapter import CATALOG_PATH, load_modbus_adapter
 from .spec.catalog import Catalog, load_catalog
 from .spec.loader import ScenarioError, load_scenario
+from .transport.link import encapsulate
+from .transport.spec import TransportSpec
 
 app = typer.Typer(help="ICS 工控协议流量生成器")
 ops_app = typer.Typer(help="操作类型目录")
@@ -110,46 +112,74 @@ def mutate_cmd(
     rules: str = typer.Option("all", "--rules", help="逗号分隔的规则名，all 表示全部"),
     seed: int = typer.Option(0, "--seed", help="随机种子"),
 ) -> None:
-    """对数据集做变异，产出 mutated 层。"""
+    """对数据集做变异，产出 mutated 层。
+
+    变异以一次操作为单位：请求帧与响应帧构成一段会话，规则作用于整段
+    会话。变异结果按源数据集的链路参数重新封装，进入 mutated 层的
+    session.pcap，与其它层保持同样的目录结构。
+    """
     manifest_path = dataset / "manifest.json"
     if not manifest_path.exists():
         typer.echo(f"找不到 {manifest_path}", err=True)
         raise typer.Exit(code=1)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
-    builder = DatasetBuilder(manifest.get("dataset", dataset.name), output)
+    transport = manifest.get("transport")
+    spec = TransportSpec.from_dict(transport) if transport else None
+    if spec is None:
+        typer.echo("源数据集未记录传输层参数，mutated 层不生成 session.pcap", err=True)
+    builder = DatasetBuilder(
+        manifest.get("dataset", dataset.name), output, transport=transport
+    )
     rule_names = [r.strip() for r in rules.split(",") if r.strip()]
 
+    seq = 0
     for entry in manifest["artifacts"]:
-        source = dataset / entry["tier"] / f"{entry['protocol']}_{entry['transport']}" / "frames" / f"{entry['id']}.bin"
-        if not source.exists():
+        frames_dir = (
+            dataset / entry["tier"] / f"{entry['protocol']}_{entry['transport']}" / "frames"
+        )
+        request_path = frames_dir / f"{entry['id']}.bin"
+        if not request_path.exists():
             continue
-        payload = source.read_bytes()
+        source_frames = [request_path.read_bytes()]
+        response_path = frames_dir / f"{entry['id']}.resp.bin"
+        if response_path.exists():
+            source_frames.append(response_path.read_bytes())
         try:
-            mutated_frames = mutate(payload, rule_names, seed)
+            mutated_frames = mutate_frames(source_frames, rule_names, seed)
         except KeyError as exc:
             typer.echo(f"变异规则名非法: {exc}", err=True)
             raise typer.Exit(code=1)
         for mutated in mutated_frames:
-            builder.add(
-                Artifact(
-                    id=f"{entry['id']}~{mutated.rule}",
-                    protocol=entry["protocol"],
-                    transport=entry["transport"],
-                    op=entry["op"],
-                    variant=entry["variant"],
-                    tier="mutated",
-                    payload=mutated.payload,
-                    metadata=entry.get("meta", {}),
-                    parent_id=entry["id"],
-                    mutation={
-                        "rule": mutated.rule,
-                        "seed": mutated.seed,
-                        "offset": mutated.offset,
-                        "original_sha256": mutated.original_sha256,
-                    },
-                )
+            frames = list(mutated.frames)
+            artifact = Artifact(
+                id=f"{entry['id']}~{mutated.rule}",
+                protocol=entry["protocol"],
+                transport=entry["transport"],
+                op=entry["op"],
+                variant=entry["variant"],
+                tier="mutated",
+                payload=frames[0],
+                response=frames[1] if len(frames) > 1 else None,
+                extra_frames=tuple(frames[2:]),
+                metadata=entry.get("meta", {}),
+                parent_id=entry["id"],
+                mutation={
+                    "rule": mutated.rule,
+                    "seed": mutated.seed,
+                    "offset": mutated.offset,
+                    "original_sha256": mutated.original_sha256,
+                },
             )
+            builder.add(artifact)
+            if spec is None:
+                continue
+            packets = []
+            for frame, outgoing in zip(frames, frame_roles(artifact)):
+                direction = spec if outgoing else spec.reversed()
+                packets.append(encapsulate(frame, direction, seq=seq, ack=seq))
+                seq += len(frame)
+            builder.add_linked_packets(artifact.id, packets)
     root = builder.write()
     typer.echo(f"已生成变异数据集: {root}")
 

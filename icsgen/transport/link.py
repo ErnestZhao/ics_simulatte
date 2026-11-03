@@ -1,13 +1,42 @@
 """链路封装：把协议帧包装成 Ethernet / IP / TCP / UDP 字节。
 
 序列化时由 Scapy 填充 IP 与 TCP/UDP 的校验和。
+
+串口传输没有以太网封装，协议帧是裸字节；这类帧在 pcap 里按 Linux
+cooked capture 记录，帧体前面加一段 SLL 头。
 """
 
 from __future__ import annotations
 
+import struct
+
 from scapy.all import Dot1Q, Ether, IP, TCP, UDP
 
 from .spec import DEFAULT_SOURCE_PORT, TransportSpec
+
+#: SLL 包类型：本机发出
+SLL_PKTTYPE_OUTGOING = 4
+#: SLL 包类型：本机接收
+SLL_PKTTYPE_HOST = 0
+#: SLL 头长度
+SLL_HEADER_LEN = 16
+
+
+def sll_header(outgoing: bool, mac: str = "00:00:00:00:00:00") -> bytes:
+    """构造 16 字节 Linux SLL 头。
+
+    串口线上没有链路层，裸协议帧按 Linux cooked capture 记录：SLL 头
+    声明链路类型与方向，协议字段留 0 表示上层未知，帧体仍是裸协议字节。
+    """
+    address = bytes.fromhex(mac.replace(":", ""))[:6].ljust(8, b"\x00")
+    return struct.pack(
+        ">HHH8sH",
+        SLL_PKTTYPE_OUTGOING if outgoing else SLL_PKTTYPE_HOST,
+        1,  # ARPHRD_ETHERNET
+        6,  # 链路层地址长度
+        address,
+        0,  # 上层协议未知
+    )
 
 
 def encapsulate(

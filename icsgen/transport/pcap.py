@@ -13,6 +13,8 @@ from pathlib import Path
 PCAP_MAGIC = 0xA1B2C3D4
 #: 链路类型：1 = Ethernet
 LINKTYPE_ETHERNET = 1
+#: 链路类型：113 = Linux cooked capture（SLL），串口传输用
+LINKTYPE_LINUX_SLL = 113
 #: 单包最大长度
 SNAPLEN = 65535
 

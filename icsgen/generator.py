@@ -29,7 +29,7 @@ def build_dataset(
 ) -> Path:
     """按场景生成数据集，返回数据集根路径。"""
     spec = _transport_spec(scenario)
-    builder = DatasetBuilder(name or scenario.name, root)
+    builder = DatasetBuilder(name or scenario.name, root, transport=spec.to_dict())
 
     for index, op in enumerate(scenario.operations):
         ctx = BuildContext(

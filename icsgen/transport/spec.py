@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
+from typing import Any, Mapping
 
 #: 未指定源端口时的起始端口，后续按会话递增
 DEFAULT_SOURCE_PORT = 40001
@@ -36,3 +37,12 @@ class TransportSpec:
             sport=self.dport,
             dport=self.sport if self.sport is not None else DEFAULT_SOURCE_PORT,
         )
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为普通字典，供 manifest 记录。"""
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "TransportSpec":
+        """从 manifest 里记录的字典还原传输配置。"""
+        return cls(**dict(data))

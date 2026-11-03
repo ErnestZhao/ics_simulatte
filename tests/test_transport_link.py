@@ -1,8 +1,10 @@
 """传输封装层：Ethernet / IP / TCP / UDP。"""
 
+import struct
+
 from scapy.all import Ether, IP, TCP, UDP
 
-from icsgen.transport.link import encapsulate
+from icsgen.transport.link import encapsulate, sll_header
 from icsgen.transport.spec import TransportSpec
 
 
@@ -72,3 +74,29 @@ def test_reversed_spec_yields_opposite_direction_on_the_wire():
     assert request[IP].dst == response[IP].src
     assert request[TCP].sport == response[TCP].dport
     assert request[TCP].dport == response[TCP].sport
+
+
+def test_sll_header_is_sixteen_bytes():
+    """串口帧按 Linux cooked capture 记录，头部固定 16 字节。"""
+    header = sll_header(outgoing=True)
+    assert len(header) == 16
+
+
+def test_sll_header_marks_direction():
+    """SLL 头区分本机发出与本机接收。"""
+    outgoing = struct.unpack(">H", sll_header(outgoing=True)[:2])[0]
+    incoming = struct.unpack(">H", sll_header(outgoing=False)[:2])[0]
+    assert outgoing == 4
+    assert incoming == 0
+
+
+def test_sll_header_leaves_protocol_unknown():
+    """串口没有上层协议字段可用，协议号留 0。"""
+    protocol = struct.unpack(">H", sll_header(outgoing=True)[14:16])[0]
+    assert protocol == 0
+
+
+def test_transport_spec_round_trips_through_dict():
+    """传输层参数写进 manifest 后要能原样还原，供派生数据集重建封装。"""
+    spec = TransportSpec(kind="serial", dport=9600, src_ip="10.0.0.1")
+    assert TransportSpec.from_dict(spec.to_dict()) == spec

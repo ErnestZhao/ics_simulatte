@@ -2,7 +2,7 @@
 
 import pytest
 
-from icsgen.mutate.engine import mutate
+from icsgen.mutate.engine import mutate, mutate_frames
 from icsgen.mutate.rules import RULE_NAMES
 
 
@@ -70,3 +70,66 @@ def test_mutated_payload_differs_from_original():
 def test_unknown_rule_raises():
     with pytest.raises(KeyError):
         mutate(b"\x00", ["no_such_rule"], seed=1)
+
+
+def test_paired_rules_need_at_least_two_frames():
+    """成对规则在单帧输入下不适用。"""
+    assert mutate_frames([b"\x00\x01"], ["duplicate_replay"], seed=1) == []
+    assert mutate_frames([b"\x00\x01"], ["interleave_frames"], seed=1) == []
+
+
+def test_duplicate_replay_repeats_first_frame():
+    """重放：在会话末尾把首帧原样再发一次。"""
+    frames = [b"\xaa\xbb", b"\x11\x22"]
+    result = mutate_frames(frames, ["duplicate_replay"], seed=1)
+    assert len(result) == 1
+    assert result[0].frames == (b"\xaa\xbb", b"\x11\x22", b"\xaa\xbb")
+
+
+def test_interleave_frames_alternates_bytes():
+    """交错：前两帧的字节轮流出现，合并成一帧。"""
+    frames = [b"\xaa\xbb", b"\x11\x22"]
+    result = mutate_frames(frames, ["interleave_frames"], seed=1)
+    assert len(result) == 1
+    assert result[0].frames == (b"\xaa\x11\xbb\x22",)
+
+
+def test_single_frame_rules_keep_the_other_frames():
+    """单帧规则只改首帧，其余帧原样保留。"""
+    frames = [b"\x00\x01\x02", b"\x09\x08"]
+    result = mutate_frames(frames, ["bit_flip"], seed=1)
+    assert len(result) == 1
+    assert result[0].frames[0] != frames[0]
+    assert result[0].frames[1] == frames[1]
+
+
+def test_paired_rules_keep_request_and_response_in_place():
+    """成对规则产生的新帧追加在末尾，请求与应答的位置不漂移。"""
+    frames = [b"\xaa\xbb", b"\x11\x22"]
+    result = mutate_frames(frames, ["duplicate_replay"], seed=1)[0]
+    assert result.frames[0] == frames[0]
+    assert result.frames[1] == frames[1]
+
+
+def test_every_rule_applies_on_a_paired_session():
+    """成对输入下每条规则都能产生变异。"""
+    frames = [b"\x00\x01\x00\x00\x00\x06\x01\x03\x00\x00\x00\x03", b"\x01\x03\x06\x00\x01"]
+    for name in RULE_NAMES:
+        results = mutate_frames(frames, [name], seed=7)
+        assert results, f"规则 {name} 未产生任何变异"
+
+
+def test_mutate_frames_is_deterministic():
+    frames = [bytes(range(10)), bytes(range(5))]
+    first = mutate_frames(frames, ["all"], seed=7)
+    second = mutate_frames(frames, ["all"], seed=7)
+    assert [m.frames for m in first] == [m.frames for m in second]
+
+
+def test_mutate_frames_records_hash_of_the_whole_session():
+    """溯源信息按整段会话计算，而不是只看首帧。"""
+    import hashlib
+
+    frames = [b"\x01\x02", b"\x03\x04"]
+    result = mutate_frames(frames, ["bit_flip"], seed=1)[0]
+    assert result.original_sha256 == hashlib.sha256(b"\x01\x02\x03\x04").hexdigest()

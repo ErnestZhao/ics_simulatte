@@ -2,16 +2,18 @@
 
 import json
 
+import pytest
+
 from icsgen.emit.dataset import Artifact, DatasetBuilder, write_dataset
 from icsgen.transport.link import encapsulate
 from icsgen.transport.spec import TransportSpec
 
 
-def _artifact(op="modbus.read_holding_registers", tier="legit", payload=b"\x01\x02"):
+def _artifact(op="modbus.read_holding_registers", tier="legit", payload=b"\x01\x02", transport="tcp"):
     return Artifact(
         id=f"{op}#001",
         protocol="modbus",
-        transport="tcp",
+        transport=transport,
         op=op,
         variant="normal",
         tier=tier,
@@ -137,3 +139,62 @@ def test_builder_collects_artifacts(tmp_path):
     builder.add_linked_packets("modbus.read_holding_registers#001", [encapsulate(b"\x01", TransportSpec())])
     path = builder.write()
     assert (path / "manifest.json").exists()
+
+
+def test_extra_frames_are_written_and_counted(tmp_path):
+    """追加帧（重放）单独落盘，并在 manifest 里记录帧数。"""
+    builder = DatasetBuilder("demo", tmp_path / "ds")
+    builder.add(
+        Artifact(
+            id="modbus.read_holding_registers#001~duplicate_replay",
+            protocol="modbus",
+            transport="tcp",
+            op="modbus.read_holding_registers",
+            variant="normal",
+            tier="mutated",
+            payload=b"\x01\x03",
+            response=b"\x01\x03\x06\x00",
+            extra_frames=(b"\x01\x03",),
+        )
+    )
+    builder.add_linked_packets(
+        "modbus.read_holding_registers#001~duplicate_replay",
+        [
+            encapsulate(b"\x01\x03", TransportSpec()),
+            encapsulate(b"\x01\x03\x06\x00", TransportSpec().reversed()),
+            encapsulate(b"\x01\x03", TransportSpec()),
+        ],
+    )
+    root = builder.write()
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    entry = manifest["artifacts"][0]
+    assert entry["pcap_frame_count"] == 3
+    frames = root / "mutated" / "modbus_tcp" / "frames"
+    replay = frames / "modbus.read_holding_registers#001~duplicate_replay.frame2.bin"
+    assert replay.read_bytes() == b"\x01\x03"
+
+
+def test_packet_count_must_match_frame_count(tmp_path):
+    """挂载的包数与产物帧数不一致时报错，避免 manifest 索引错位。"""
+    builder = DatasetBuilder("demo", tmp_path / "ds")
+    builder.add(_artifact())
+    with pytest.raises(ValueError):
+        builder.add_linked_packets(
+            "modbus.read_holding_registers#001",
+            [encapsulate(b"\x01", TransportSpec()), encapsulate(b"\x02", TransportSpec())],
+        )
+
+
+def test_serial_session_is_recorded_as_linux_sll(tmp_path):
+    """串口会话的 pcap 用 Linux SLL 记录，帧体是裸协议字节。"""
+    builder = DatasetBuilder(
+        "demo", tmp_path / "ds", transport=TransportSpec(kind="serial").to_dict()
+    )
+    builder.add(_artifact(transport="rtu"))
+    builder.add_linked_packets(
+        "modbus.read_holding_registers#001", [encapsulate(b"\x11\x03", TransportSpec(kind="serial"))]
+    )
+    root = builder.write()
+    data = (root / "legit" / "modbus_rtu" / "session.pcap").read_bytes()
+    assert int.from_bytes(data[20:24], "little") == 113
+    assert b"\x11\x03" in data
