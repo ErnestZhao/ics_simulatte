@@ -1,10 +1,13 @@
 """Web 服务层：协议查询、配置保存、生成调度与产物预览。"""
 
+import json
+import threading
 import time
 
 import pytest
 
-from icsgen.web.models import ConfigPayload, GenerationPayload, OperationInput
+from icsgen.spec.loader import ScenarioError
+from icsgen.web.models import ConfigPayload, OperationInput
 from icsgen.web.service import (
     AlreadyGenerated,
     MAX_COUNT_PER_OPERATION,
@@ -75,7 +78,7 @@ def test_save_config_records_selection(tmp_path):
 
 def test_save_config_rejects_unknown_operation(tmp_path):
     store = WebStore(tmp_path)
-    with pytest.raises(Exception) as info:
+    with pytest.raises(ScenarioError) as info:
         save_config(store, _payload(op="modbus.nope"))
     assert "不存在操作" in str(info.value)
 
@@ -88,7 +91,7 @@ def test_save_config_rejects_bad_param(tmp_path):
         transport={"kind": "tcp"},
         operations=[OperationInput(op="modbus.read_holding_registers", params={"quantity": 9999})],
     )
-    with pytest.raises(Exception) as info:
+    with pytest.raises(ScenarioError) as info:
         save_config(store, payload)
     assert "参数校验失败" in str(info.value)
 
@@ -228,3 +231,62 @@ def test_failed_generation_does_not_report_full_progress(tmp_path):
     assert detail["status"] == "failed"
     assert detail["phase"] == "failed"
     assert detail["percent"] == 0.0
+
+
+def test_concurrent_start_generates_config_only_once(tmp_path, monkeypatch):
+    """并发发起同一个配置的生成，只能成功一次（spec §6.3 / §12 的 409）。"""
+
+    def fake_build_dataset(scenario, adapter, root, name=None, on_progress=None):
+        (root / "manifest.json").write_text(
+            json.dumps({"artifacts": []}), encoding="utf-8"
+        )
+        if on_progress is not None:
+            on_progress(1, 1)
+        return root
+
+    monkeypatch.setattr("icsgen.web.service.build_dataset", fake_build_dataset)
+    store = WebStore(tmp_path)
+    record = save_config(store, _payload(count=1))
+    service = GenerationService(store)
+    workers = 8
+    barrier = threading.Barrier(workers)
+    succeeded: list[str] = []
+    rejected: list[str] = []
+
+    def worker() -> None:
+        barrier.wait()
+        try:
+            result = service.start(record["id"])
+        except AlreadyGenerated as exc:
+            rejected.append(str(exc))
+        else:
+            succeeded.append(result["generation_id"])
+
+    threads = [threading.Thread(target=worker) for _ in range(workers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=20)
+
+    assert len(succeeded) == 1
+    assert len(rejected) == workers - 1
+    started = [
+        event
+        for event in store.list_events()
+        if event.get("type") == "generation_started"
+    ]
+    assert len(started) == 1
+
+
+def test_failed_generation_reports_zero_percent(tmp_path):
+    """失败的生成进度是 0 —— 不能按已完成的交互数报个半截进度。"""
+    assert _percent(3, 10, "failed") == 0.0
+    assert _percent(0, 0, "failed") == 0.0
+
+
+def test_list_operations_does_not_expose_cached_params():
+    """拿到的 params 是副本 —— 改它不能污染进程内缓存的 catalog（增量 1 的 lru_cache）。"""
+    first = list_operations("modbus")
+    first[0]["params"]["quantity"]["maximum"] = 999
+    second = list_operations("modbus")
+    assert second[0]["params"]["quantity"]["maximum"] != 999

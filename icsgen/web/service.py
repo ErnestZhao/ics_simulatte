@@ -9,6 +9,7 @@ import json
 import threading
 import time
 import uuid
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -70,7 +71,7 @@ def list_operations(protocol: str) -> list[dict[str, Any]]:
             "layout": entry.layout,
             "func_code": entry.func_code,
             "variants": list(entry.variants),
-            "params": entry.params,
+            "params": deepcopy(entry.params),
         }
         for entry in catalog.operations.values()
     ]
@@ -183,29 +184,31 @@ class GenerationService:
         config = self.store.get_config(config_id)
         if config is None:
             raise NotFound(f"配置记录 {config_id!r} 不存在")
-        existing = self.store.generation_for_config(config_id)
-        if existing is not None:
-            raise AlreadyGenerated(f"该配置已生成过（{existing}），不能重复生成")
-        generation_id = f"gen_{uuid.uuid4().hex[:12]}"
-        output_dir = self.store.generation_dir(generation_id)
-        self.store.append_event(
-            {
-                "type": "generation_started",
-                "generation_id": generation_id,
-                "config_id": config_id,
-                "config_name": config.get("name"),
-                "output_dir": str(output_dir),
-                "created_at": _now(),
-            }
-        )
-        job = {
-            "generation_id": generation_id,
-            "done": 0,
-            "total": 0,
-            "phase": "building",
-            "error": None,
-        }
+        # 守卫与「追加 started 事件」必须原子 —— 否则两个并发请求会同时
+        # 通过检查，把同一份配置生成两次（spec §6.3 / §12 的 409）。
         with self._lock:
+            existing = self.store.generation_for_config(config_id)
+            if existing is not None:
+                raise AlreadyGenerated(f"该配置已生成过（{existing}），不能重复生成")
+            generation_id = f"gen_{uuid.uuid4().hex[:12]}"
+            output_dir = self.store.generation_dir(generation_id)
+            self.store.append_event(
+                {
+                    "type": "generation_started",
+                    "generation_id": generation_id,
+                    "config_id": config_id,
+                    "config_name": config.get("name"),
+                    "output_dir": str(output_dir),
+                    "created_at": _now(),
+                }
+            )
+            job = {
+                "generation_id": generation_id,
+                "done": 0,
+                "total": 0,
+                "phase": "building",
+                "error": None,
+            }
             self._jobs[generation_id] = job
         thread = threading.Thread(
             target=self._run, args=(config, generation_id, output_dir, job), daemon=True
@@ -264,7 +267,11 @@ class GenerationService:
             )
 
     def state(self, generation_id: str) -> dict[str, Any] | None:
-        """进行中任务的内存状态；已完成的任务返回 None。"""
+        """任务的内存状态；没有记录时返回 None。
+
+        任务结束后条目仍留在内存里，phase 变成 done / failed ——
+        调用方靠 phase 区分进行中与已结束。
+        """
         with self._lock:
             job = self._jobs.get(generation_id)
             return dict(job) if job else None
@@ -302,9 +309,12 @@ def _artifact_summaries(manifest: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _percent(done: int, total: int, phase: str) -> float:
-    """两阶段进度：生成帧占 0–85，写盘占 85–100。"""
+    """两阶段进度：生成帧占 0–85，写盘占 85–100；失败一律 0。"""
     if phase == "done":
         return 100.0
+    if phase == "failed":
+        # 失败不是进度 —— 重启后（没有内存任务）也是 0，两条路径必须一致。
+        return 0.0
     if total <= 0:
         return 0.0
     if phase == "writing":
