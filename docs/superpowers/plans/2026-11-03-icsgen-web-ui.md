@@ -486,7 +486,7 @@ def load_scenario(path: Path, catalog: Catalog) -> Scenario:
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `python3 -m pytest tests/test_catalog.py -q`
-Expected: 全部通过（含原有 13 个用例）
+Expected: 全部通过（含原有 11 个用例）
 
 - [ ] **Step 5: 跑全量测试**
 
