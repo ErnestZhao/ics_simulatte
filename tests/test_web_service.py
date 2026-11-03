@@ -234,7 +234,28 @@ def test_failed_generation_does_not_report_full_progress(tmp_path):
 
 
 def test_concurrent_start_generates_config_only_once(tmp_path, monkeypatch):
-    """并发发起同一个配置的生成，只能成功一次（spec §6.3 / §12 的 409）。"""
+    """并发发起同一个配置的生成，只能成功一次（spec §6.3 / §12 的 409）。
+
+    把「读守卫」这一拍拉长，让竞态必现 —— 不靠线程调度的运气。
+    """
+    original_lookup = WebStore.generation_for_config
+
+    def slow_lookup(self, config_id):
+        # 拉长「读到 None」与「追加 started 事件」之间的窗口：
+        # 没有互斥时，8 个线程必然同时读到 None；加了锁则被串行化，
+        # 只有第一个读到 None，其余读到已存在的生成。
+        #
+        # sleep 必须放在「读完」之后而不是之前：放在之前只是把 8 个线程的
+        # 读操作对齐到同一时刻，可读→追加之间仍是微秒级窗口 —— 某个线程
+        # 若被调度推迟到别人追加之后才去读，就会看到已存在的生成而误判成
+        # 「守卫生效」，竞态被漏过去（实测约 3 成漏报）。
+        # 放在读完之后，8 个线程必然全部先读到 None，再各自进入追加，
+        # 窗口大到必然被撞上（实测 40/40 检出）。
+        result = original_lookup(self, config_id)
+        time.sleep(0.05)
+        return result
+
+    monkeypatch.setattr(WebStore, "generation_for_config", slow_lookup)
 
     def fake_build_dataset(scenario, adapter, root, name=None, on_progress=None):
         (root / "manifest.json").write_text(
