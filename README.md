@@ -44,6 +44,9 @@ datasets/demo/
 
 - **`.bin` 是纯协议帧**，不含 IP/TCP 头，便于单元测试逐字节断言。
 - **`.pcap` 是完整链路帧**，请求与响应成对连续，保留会话连贯性，便于人工分析与规则引擎回放。
+- **TCP 会话是完整的一次连接**：pcap 里含三次握手（`S` / `SA` / `A`）与四次挥手
+  （`FA` / `A` / `FA` / `A`），序号严格自洽 —— SYN 与 FIN 各占一个序号，数据段按
+  载荷长度推进。串口与 UDP 没有握手。
 - **一次操作 = 一个 Artifact**：请求与响应同属一条记录，manifest 记 `pcap_index` 与 `pcap_resp_index`。
 - **`legit` / `abnormal` / `mutated` 三层互不污染**，manifest 记录每条产物的 tier。
 - **串口传输的 pcap 用 Linux SLL 记录**，帧体是裸 RTU 字节，与 spec §10 一致。
@@ -59,6 +62,8 @@ icsgen mutate datasets/demo -o datasets/fuzz --rules all --seed 42
 - 单帧规则（`bit_flip`、`truncate`、`func_code_corrupt` 等 10 条）只改请求帧，响应保持设备对合法请求的正常应答。
 - 成对规则作用于整段会话：`duplicate_replay` 在会话末尾重放请求帧，`interleave_frames` 把请求与响应逐字节交错、合并成一帧。
 - 变异结果按源数据集 manifest 里记录的链路参数重新封装，进入 `mutated` 层的 `session.pcap`，与其它层结构一致。
+- 变异层同样是完整的 TCP 连接：会话形态（握手 / 挥手）随源 manifest 的
+  `transport.session` 传递，变异层按同样的形态重建。
 - 同一 seed 与同一输入必得同一输出；产物记录 `mutation` 溯源（规则名、seed、偏移、原始哈希）。
 
 ## 语义层与变体
@@ -89,6 +94,9 @@ icsgen serve --protocol modbus --transport tcp --port 5020 --role client
 python -m pip install -e ".[web]"
 icsgen web --host 127.0.0.1 --port 8080
 ```
+
+传输配置里的 `session` 字段控制会话形态：`full`（默认，握手 + 数据 + 挥手）或
+`data`（只发数据段）。
 
 浏览器打开 `http://127.0.0.1:8080`，走「选协议 → 选操作 → 填参数与交互数量 → 保存配置 → 生成 → 进度 → 预览 → 下载」全链路：
 

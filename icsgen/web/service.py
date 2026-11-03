@@ -121,6 +121,15 @@ def save_config(store: WebStore, payload: ConfigPayload) -> dict[str, Any]:
     unknown = sorted(set(payload.transport) - known_transport_fields)
     if unknown:
         raise WebError(f"传输配置里有未知字段：{'、'.join(unknown)}")
+    # 传输配置要能被 TransportSpec 接受：非法取值在写账本之前就得拦住 ——
+    # 配置记录一旦落进只追加的账本就删不掉了。取值集合仍只有传输层那一份，
+    # 这里只是拿构造器验一遍，不另写白名单。
+    try:
+        raw = dict(payload.transport)
+        kind = raw.pop("kind", "tcp")
+        TransportSpec(kind=kind, **raw)
+    except (TypeError, ValueError) as exc:
+        raise WebError(f"传输配置不合法：{exc}") from exc
     items = []
     for index, item in enumerate(payload.operations):
         try:

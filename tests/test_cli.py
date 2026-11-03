@@ -120,7 +120,8 @@ def test_mutated_tier_has_session_pcap(tmp_path):
     assert pcap.exists()
     packets = rdpcap(str(pcap))
     expected = sum(entry["pcap_frame_count"] for entry in manifest["artifacts"])
-    assert len(packets) == expected
+    # 变异层同样是完整的 TCP 连接：多出握手 3 包与挥手 4 包
+    assert len(packets) == expected + 3 + 4
     # 链路参数沿用源数据集
     assert packets[0][IP].src == "10.0.0.1"
     assert packets[0][IP].dst == "10.0.0.2"
@@ -175,10 +176,11 @@ def test_replay_rule_adds_a_third_packet(tmp_path):
     entry = manifest["artifacts"][0]
     assert entry["pcap_frame_count"] == 3
     packets = rdpcap(str(dst / "mutated" / "modbus_tcp" / "session.pcap"))
-    assert len(packets) == 3
-    # 重放的是原请求帧
+    # 握手 3 包 + 挥手 4 包
+    assert len(packets) == 3 + 3 + 4
+    # 重放的是原请求帧（前面多了 3 个握手包，索引后移）
     request = (dst / "mutated" / "modbus_tcp" / "frames" / f"{entry['id']}.bin").read_bytes()
-    assert bytes(packets[2][TCP].payload) == request
+    assert bytes(packets[5][TCP].payload) == request
 
 
 def test_serial_dataset_pcap_uses_linux_sll(tmp_path):
@@ -203,6 +205,38 @@ def test_serial_dataset_pcap_uses_linux_sll(tmp_path):
     data = (dst / "mutated" / "modbus_rtu" / "session.pcap").read_bytes()
     # SLL 头 16 字节之后是裸协议帧
     assert raw in data
+
+
+def test_mutate_command_writes_full_tcp_session(tmp_path):
+    """变异层同样是一次完整的 TCP 连接：握手 → 数据 → 挥手。"""
+    from scapy.all import TCP, rdpcap
+
+    from icsgen.generator import build_dataset
+    from icsgen.protocols.modbus.adapter import load_modbus_adapter
+    from icsgen.spec.model import Operation, Scenario
+
+    source = tmp_path / "src"
+    build_dataset(
+        Scenario(
+            name="demo",
+            transport={"kind": "tcp"},
+            operations=(
+                Operation(op="modbus.read_holding_registers", params={"quantity": 3}),
+            ),
+        ),
+        load_modbus_adapter(),
+        source,
+        name="demo",
+    )
+    output = tmp_path / "fuzz"
+    result = runner.invoke(
+        app, ["mutate", str(source), "-o", str(output), "--rules", "bit_flip"]
+    )
+    assert result.exit_code == 0, result.output
+    packets = rdpcap(str(output / "mutated" / "modbus_tcp" / "session.pcap"))
+    flags = [p[TCP].flags for p in packets]
+    assert flags[:3] == ["S", "SA", "A"]
+    assert flags[-4:] == ["FA", "A", "FA", "A"]
 
 
 def test_web_command_is_registered():

@@ -12,7 +12,7 @@ from typing import Any
 
 import typer
 
-from .emit.dataset import Artifact, DatasetBuilder, frame_roles
+from .emit.dataset import Artifact, DatasetBuilder, frame_roles, session_key
 from .generator import build_dataset
 from .mutate.engine import mutate_frames
 from .protocols.modbus.adapter import load_modbus_adapter
@@ -20,6 +20,7 @@ from .protocols.registry import get_catalog
 from .spec.catalog import Catalog
 from .spec.loader import ScenarioError, load_scenario
 from .transport.link import encapsulate
+from .transport.session import TcpSession
 from .transport.spec import TransportSpec
 
 app = typer.Typer(help="ICS 工控协议流量生成器")
@@ -135,7 +136,7 @@ def mutate_cmd(
     )
     rule_names = [r.strip() for r in rules.split(",") if r.strip()]
 
-    seq = 0
+    sessions: dict[str, TcpSession] = {}
     for entry in manifest["artifacts"]:
         frames_dir = (
             dataset / entry["tier"] / f"{entry['protocol']}_{entry['transport']}" / "frames"
@@ -176,12 +177,29 @@ def mutate_cmd(
             builder.add(artifact)
             if spec is None:
                 continue
-            packets = []
-            for frame, outgoing in zip(frames, frame_roles(artifact)):
-                direction = spec if outgoing else spec.reversed()
-                packets.append(encapsulate(frame, direction, seq=seq, ack=seq))
-                seq += len(frame)
+            if spec.kind == "tcp":
+                key = session_key(artifact)
+                session = sessions.get(key)
+                if session is None:
+                    session = TcpSession(spec)
+                    sessions[key] = session
+                    if spec.session == "full":
+                        builder.begin_session(key, session.handshake())
+                packets = [
+                    session.data(frame, outgoing=outgoing)
+                    for frame, outgoing in zip(frames, frame_roles(artifact))
+                ]
+            else:
+                packets = [
+                    encapsulate(frame, spec if outgoing else spec.reversed())
+                    for frame, outgoing in zip(frames, frame_roles(artifact))
+                ]
             builder.add_linked_packets(artifact.id, packets)
+
+    for key, session in sessions.items():
+        if spec.session == "full":
+            builder.end_session(key, session.teardown())
+
     root = builder.write()
     typer.echo(f"已生成变异数据集: {root}")
 

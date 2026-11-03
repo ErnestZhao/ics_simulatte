@@ -401,3 +401,17 @@ def test_list_operations_does_not_expose_cached_params():
     first[0]["params"]["quantity"]["maximum"] = 999
     second = list_operations("modbus")
     assert second[0]["params"]["quantity"]["maximum"] != 999
+
+
+def test_save_config_rejects_invalid_session_mode(tmp_path):
+    """非法会话形态要在写账本之前报错 —— 记录落盘就删不掉了。"""
+    store = WebStore(tmp_path)
+    payload = ConfigPayload(
+        name="非法形态",
+        transport={"kind": "tcp", "session": "bogus"},
+        operations=[OperationInput(op="modbus.read_holding_registers", count=1)],
+    )
+    with pytest.raises(WebError) as excinfo:
+        save_config(store, payload)
+    assert "bogus" in str(excinfo.value)
+    assert store.list_configs() == []
