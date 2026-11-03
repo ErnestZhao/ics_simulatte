@@ -43,6 +43,20 @@ datasets/demo/
 - **`.pcap` 是完整链路帧**，请求与响应成对连续，保留会话连贯性，便于人工分析与规则引擎回放。
 - **一次操作 = 一个 Artifact**：请求与响应同属一条记录，manifest 记 `pcap_index` 与 `pcap_resp_index`。
 - **`legit` / `abnormal` / `mutated` 三层互不污染**，manifest 记录每条产物的 tier。
+- **串口传输的 pcap 用 Linux SLL 记录**，帧体是裸 RTU 字节，与 spec §10 一致。
+
+## 变异引擎
+
+变异以**一次操作**为单位：请求帧与响应帧构成一段会话，规则作用于整段会话。
+
+```bash
+icsgen mutate datasets/demo -o datasets/fuzz --rules all --seed 42
+```
+
+- 单帧规则（`bit_flip`、`truncate`、`func_code_corrupt` 等 10 条）只改请求帧，响应保持设备对合法请求的正常应答。
+- 成对规则作用于整段会话：`duplicate_replay` 在会话末尾重放请求帧，`interleave_frames` 把请求与响应逐字节交错、合并成一帧。
+- 变异结果按源数据集 manifest 里记录的链路参数重新封装，进入 `mutated` 层的 `session.pcap`，与其它层结构一致。
+- 同一 seed 与同一输入必得同一输出；产物记录 `mutation` 溯源（规则名、seed、偏移、原始哈希）。
 
 ## 语义层与变体
 

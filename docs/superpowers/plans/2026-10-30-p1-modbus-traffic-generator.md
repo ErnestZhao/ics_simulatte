@@ -3035,6 +3035,8 @@ EOF
   - `icsgen.transport.spec.TransportSpec`：`frozen dataclass`，字段 `kind: str = "tcp"`、`dport: int = 502`、`sport: int | None = None`、`src_ip: str = "192.168.1.10"`、`dst_ip: str = "192.168.1.20"`、`mac_src: str = "02:00:00:00:00:01"`、`mac_dst: str = "02:00:00:00:00:02"`、`vlan_id: int | None = None`；方法 `reversed() -> TransportSpec` —— 返回方向相反的传输配置（源/目的 IP 与 MAC 对调、端口对调），用于响应的反向链路封装
   - `icsgen.transport.spec.DEFAULT_SOURCE_PORT = 40001` —— 未指定源端口时的起始端口（由 `TransportSpec.reversed()` 与链路封装共用）
   - `icsgen.transport.link.encapsulate(payload: bytes, transport: TransportSpec, *, seq: int = 0, ack: int = 0, flags: str = "PA") -> bytes` —— 返回完整链路字节
+  - `icsgen.transport.link.sll_header(outgoing: bool, mac: str = "00:00:00:00:00:00") -> bytes` —— 16 字节 Linux SLL 头，串口帧按 Linux cooked capture 记录时加在裸协议帧前面（spec §10）
+  - `icsgen.transport.spec.TransportSpec.to_dict() -> dict[str, Any]` / `TransportSpec.from_dict(data) -> TransportSpec` —— 传输层参数与 manifest 之间的序列化，供派生数据集重建链路封装
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -3043,9 +3045,11 @@ EOF
 ```python
 """传输封装层：Ethernet / IP / TCP / UDP。"""
 
+import struct
+
 from scapy.all import Ether, IP, TCP, UDP
 
-from icsgen.transport.link import encapsulate
+from icsgen.transport.link import encapsulate, sll_header
 from icsgen.transport.spec import TransportSpec
 
 
@@ -3115,7 +3119,26 @@ def test_reversed_spec_yields_opposite_direction_on_the_wire():
     assert request[IP].dst == response[IP].src
     assert request[TCP].sport == response[TCP].dport
     assert request[TCP].dport == response[TCP].sport
-```
+
+
+def test_sll_header_is_sixteen_bytes():
+    """串口帧按 Linux cooked capture 记录，头部固定 16 字节。"""
+    header = sll_header(outgoing=True)
+    assert len(header) == 16
+
+
+def test_sll_header_marks_direction():
+    """SLL 头区分本机发出与本机接收。"""
+    outgoing = struct.unpack(">H", sll_header(outgoing=True)[:2])[0]
+    incoming = struct.unpack(">H", sll_header(outgoing=False)[:2])[0]
+    assert outgoing == 4
+    assert incoming == 0
+
+
+def test_sll_header_leaves_protocol_unknown():
+    """串口没有上层协议字段可用，协议号留 0。"""
+    protocol = struct.unpack(">H", sll_header(outgoing=True)[14:16])[0]
+    assert protocol == 0```
 
 - [ ] **Step 2: 运行测试确认失败**
 
@@ -3175,13 +3198,42 @@ class TransportSpec:
 """链路封装：把协议帧包装成 Ethernet / IP / TCP / UDP 字节。
 
 序列化时由 Scapy 填充 IP 与 TCP/UDP 的校验和。
+
+串口传输没有以太网封装，协议帧是裸字节；这类帧在 pcap 里按 Linux
+cooked capture 记录，帧体前面加一段 SLL 头。
 """
 
 from __future__ import annotations
 
+import struct
+
 from scapy.all import Dot1Q, Ether, IP, TCP, UDP
 
 from .spec import DEFAULT_SOURCE_PORT, TransportSpec
+
+#: SLL 包类型：本机发出
+SLL_PKTTYPE_OUTGOING = 4
+#: SLL 包类型：本机接收
+SLL_PKTTYPE_HOST = 0
+#: SLL 头长度
+SLL_HEADER_LEN = 16
+
+
+def sll_header(outgoing: bool, mac: str = "00:00:00:00:00:00") -> bytes:
+    """构造 16 字节 Linux SLL 头。
+
+    串口线上没有链路层，裸协议帧按 Linux cooked capture 记录：SLL 头
+    声明链路类型与方向，协议字段留 0 表示上层未知，帧体仍是裸协议字节。
+    """
+    address = bytes.fromhex(mac.replace(":", ""))[:6].ljust(8, b"\x00")
+    return struct.pack(
+        ">HHH8sH",
+        SLL_PKTTYPE_OUTGOING if outgoing else SLL_PKTTYPE_HOST,
+        1,  # ARPHRD_ETHERNET
+        6,  # 链路层地址长度
+        address,
+        0,  # 上层协议未知
+    )
 
 
 def encapsulate(
@@ -3214,8 +3266,7 @@ def encapsulate(
         ether = Ether(src=transport.mac_src, dst=transport.mac_dst, type=0x8100)
         ip = Dot1Q(vlan=transport.vlan_id) / ip
 
-    return bytes(ether / ip / layer / payload)
-```
+    return bytes(ether / ip / layer / payload)```
 
 - [ ] **Step 4: 运行测试确认通过**
 
@@ -3250,7 +3301,8 @@ EOF
 **Interfaces:**
 - Consumes: 无
 - Produces:
-  - `icsgen.transport.pcap.write_pcap(path: Path, packets: list[bytes], *, link_type: int = 1) -> None` —— 写标准 libpcap 文件（link_type 1 = Ethernet）
+  - `icsgen.transport.pcap.write_pcap(path: Path, packets: list[bytes], *, link_type: int = 1) -> None` —— 写标准 libpcap 文件（link_type 1 = Ethernet，link_type 113 = Linux SLL，串口传输用）
+  - `icsgen.transport.pcap.LINKTYPE_ETHERNET = 1` / `LINKTYPE_LINUX_SLL = 113` —— 链路类型常量
   - `icsgen.emit.raw.write_raw(directory: Path, name: str, payload: bytes) -> tuple[Path, Path]` —— 写 `.bin` 与 `.hex`，返回两个路径
 
 - [ ] **Step 1: 写失败的测试**
@@ -3323,6 +3375,8 @@ from pathlib import Path
 PCAP_MAGIC = 0xA1B2C3D4
 #: 链路类型：1 = Ethernet
 LINKTYPE_ETHERNET = 1
+#: 链路类型：113 = Linux cooked capture（SLL），串口传输用
+LINKTYPE_LINUX_SLL = 113
 #: 单包最大长度
 SNAPLEN = 65535
 
@@ -3345,8 +3399,7 @@ def write_pcap(path: Path, packets: list[bytes], *, link_type: int = LINKTYPE_ET
         )
         for packet in packets:
             fh.write(struct.pack("<IIII", 0, 0, len(packet), len(packet)))
-            fh.write(packet)
-```
+            fh.write(packet)```
 
 创建 `icsgen/emit/__init__.py`（空文件）。
 
@@ -3405,13 +3458,15 @@ EOF
 **Interfaces:**
 - Consumes: `icsgen.emit.raw.write_raw`（Task 8）、`icsgen.transport.pcap.write_pcap`（Task 8）
 - Produces:
-  - `icsgen.emit.dataset.Artifact`：`frozen dataclass`，字段 `id: str`、`protocol: str`、`transport: str`、`op: str`、`variant: str`、`tier: str`、`payload: bytes`、`response: bytes | None = None`、`metadata: dict[str, Any] = {}`、`parent_id: str | None = None`、`mutation: dict[str, Any] | None = None` —— 一次操作 = 一个 Artifact，请求与响应都挂在同一条记录上（spec §11.1）
-  - `icsgen.emit.dataset.DatasetBuilder`：`__init__(self, name: str, root: Path)`；方法 `add(artifact: Artifact) -> None`、`add_linked_packets(artifact_id: str, packets: list[bytes]) -> None`、`write() -> Path`
-  - `icsgen.emit.dataset.write_dataset(name: str, root: Path, artifacts: list[Artifact], packets: dict[str, list[bytes]], positions: dict[str, tuple[str, int]] | None = None, response_positions: dict[str, tuple[str, int]] | None = None) -> Path`
+  - `icsgen.emit.dataset.Artifact`：`frozen dataclass`，字段 `id: str`、`protocol: str`、`transport: str`、`op: str`、`variant: str`、`tier: str`、`payload: bytes`、`response: bytes | None = None`、`extra_frames: tuple[bytes, ...] = ()`、`metadata: dict[str, Any] = {}`、`parent_id: str | None = None`、`mutation: dict[str, Any] | None = None` —— 一次操作 = 一个 Artifact，请求与响应都挂在同一条记录上（spec §11.1）；`extra_frames` 是应答之后的追加帧（成对变异规则的重放帧），同样进会话 pcap
+  - `icsgen.emit.dataset.DatasetBuilder`：`__init__(self, name: str, root: Path, transport: dict[str, Any] | None = None)`；方法 `add(artifact: Artifact) -> None`、`add_linked_packets(artifact_id: str, packets: list[bytes]) -> None`、`write() -> Path`
+  - `icsgen.emit.dataset.frame_roles(artifact: Artifact) -> list[bool]` —— 会话内每帧的方向：True 为客户端发出，False 为服务端应答
+  - `icsgen.emit.dataset.write_dataset(name: str, root: Path, artifacts: list[Artifact], packets: dict[str, list[bytes]], positions: dict[str, tuple[str, int]] | None = None, response_positions: dict[str, tuple[str, int]] | None = None, transport: dict[str, Any] | None = None) -> Path` —— `transport` 是本次会话的传输层参数，写进 manifest 后派生数据集可据此重建链路封装
 
 **请求与响应**：一次操作产出一帧请求与一帧响应，二者在 pcap 里连续（spec §11.1「请求+响应连续」）。
-`add_linked_packets` 接受一组包：首个是请求（记为 `pcap_index`），次个是响应（记为 `pcap_resp_index`）。
-响应字节另存为 `<id>.resp.bin` / `<id>.resp.hex`，manifest 记 `resp_len` / `resp_sha256`。
+`add_linked_packets` 接受一组包：首个是请求（记为 `pcap_index`），次个是响应（记为 `pcap_resp_index`），其后是追加帧；包数必须与产物的帧数一致，否则抛 `ValueError`。
+响应字节另存为 `<id>.resp.bin` / `<id>.resp.hex`，manifest 记 `resp_len` / `resp_sha256`；追加帧另存为 `<id>.frame<n>.bin`（n 从 2 起）。
+manifest 记 `pcap_frame_count`（该产物占几个包）、`transport`（传输层参数）与 `pcap_index` / `pcap_resp_index`。
 
 **数据集布局**（tier 与 transport 分目录，pcap 按 (tier, transport) 聚合）：
 
@@ -3435,16 +3490,18 @@ datasets/<name>/
 
 import json
 
+import pytest
+
 from icsgen.emit.dataset import Artifact, DatasetBuilder, write_dataset
 from icsgen.transport.link import encapsulate
 from icsgen.transport.spec import TransportSpec
 
 
-def _artifact(op="modbus.read_holding_registers", tier="legit", payload=b"\x01\x02"):
+def _artifact(op="modbus.read_holding_registers", tier="legit", payload=b"\x01\x02", transport="tcp"):
     return Artifact(
         id=f"{op}#001",
         protocol="modbus",
-        transport="tcp",
+        transport=transport,
         op=op,
         variant="normal",
         tier=tier,
@@ -3570,7 +3627,65 @@ def test_builder_collects_artifacts(tmp_path):
     builder.add_linked_packets("modbus.read_holding_registers#001", [encapsulate(b"\x01", TransportSpec())])
     path = builder.write()
     assert (path / "manifest.json").exists()
-```
+
+
+def test_extra_frames_are_written_and_counted(tmp_path):
+    """追加帧（重放）单独落盘，并在 manifest 里记录帧数。"""
+    builder = DatasetBuilder("demo", tmp_path / "ds")
+    builder.add(
+        Artifact(
+            id="modbus.read_holding_registers#001~duplicate_replay",
+            protocol="modbus",
+            transport="tcp",
+            op="modbus.read_holding_registers",
+            variant="normal",
+            tier="mutated",
+            payload=b"\x01\x03",
+            response=b"\x01\x03\x06\x00",
+            extra_frames=(b"\x01\x03",),
+        )
+    )
+    builder.add_linked_packets(
+        "modbus.read_holding_registers#001~duplicate_replay",
+        [
+            encapsulate(b"\x01\x03", TransportSpec()),
+            encapsulate(b"\x01\x03\x06\x00", TransportSpec().reversed()),
+            encapsulate(b"\x01\x03", TransportSpec()),
+        ],
+    )
+    root = builder.write()
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    entry = manifest["artifacts"][0]
+    assert entry["pcap_frame_count"] == 3
+    frames = root / "mutated" / "modbus_tcp" / "frames"
+    replay = frames / "modbus.read_holding_registers#001~duplicate_replay.frame2.bin"
+    assert replay.read_bytes() == b"\x01\x03"
+
+
+def test_packet_count_must_match_frame_count(tmp_path):
+    """挂载的包数与产物帧数不一致时报错，避免 manifest 索引错位。"""
+    builder = DatasetBuilder("demo", tmp_path / "ds")
+    builder.add(_artifact())
+    with pytest.raises(ValueError):
+        builder.add_linked_packets(
+            "modbus.read_holding_registers#001",
+            [encapsulate(b"\x01", TransportSpec()), encapsulate(b"\x02", TransportSpec())],
+        )
+
+
+def test_serial_session_is_recorded_as_linux_sll(tmp_path):
+    """串口会话的 pcap 用 Linux SLL 记录，帧体是裸协议字节。"""
+    builder = DatasetBuilder(
+        "demo", tmp_path / "ds", transport=TransportSpec(kind="serial").to_dict()
+    )
+    builder.add(_artifact(transport="rtu"))
+    builder.add_linked_packets(
+        "modbus.read_holding_registers#001", [encapsulate(b"\x11\x03", TransportSpec(kind="serial"))]
+    )
+    root = builder.write()
+    data = (root / "legit" / "modbus_rtu" / "session.pcap").read_bytes()
+    assert int.from_bytes(data[20:24], "little") == 113
+    assert b"\x11\x03" in data```
 
 - [ ] **Step 2: 运行测试确认失败**
 
@@ -3597,7 +3712,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..transport.pcap import write_pcap
+from ..transport.link import sll_header
+from ..transport.pcap import LINKTYPE_ETHERNET, LINKTYPE_LINUX_SLL, write_pcap
 from .raw import write_raw
 
 
@@ -3607,6 +3723,8 @@ class Artifact:
 
     一次操作 = 一个 Artifact：请求与响应都挂在同一条记录上，
     response 为 None 表示这次操作不应有响应（如畸形帧）。
+    extra_frames 是应答之后的追加帧（成对变异规则的重放帧），它们同样
+    进入会话 pcap，但不属于请求/应答配对。
     """
 
     id: str
@@ -3617,6 +3735,7 @@ class Artifact:
     tier: str
     payload: bytes
     response: bytes | None = None
+    extra_frames: tuple[bytes, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
     parent_id: str | None = None
     mutation: dict[str, Any] | None = None
@@ -3635,12 +3754,27 @@ def _session_key(artifact: Artifact) -> str:
     return f"{artifact.tier}/{artifact.protocol}_{artifact.transport}"
 
 
+def frame_roles(artifact: Artifact) -> list[bool]:
+    """会话内每帧的方向：True 为客户端发出，False 为服务端应答。
+
+    请求在前、应答在后，追加帧（重放）由客户端发出。
+    """
+    roles = [True]
+    if artifact.response is not None:
+        roles.append(False)
+    roles.extend([True] * len(artifact.extra_frames))
+    return roles
+
+
 class DatasetBuilder:
     """收集产物并写出分层数据集。"""
 
-    def __init__(self, name: str, root: Path) -> None:
+    def __init__(
+        self, name: str, root: Path, transport: dict[str, Any] | None = None
+    ) -> None:
         self.name = name
         self.root = root
+        self.transport = transport
         self.artifacts: list[Artifact] = []
         self._packets: dict[str, list[bytes]] = {}
         self._positions: dict[str, tuple[str, int]] = {}
@@ -3655,13 +3789,19 @@ class DatasetBuilder:
 
         artifact_id 形如 ``<op>#<n>``，需与已登记的产物 id 对应。
         一次操作在会话里是连续的请求与响应，因此这里接受一组包：首个是
-        请求，次个是响应。挂载时即记录各自在会话中的包序号，供 manifest 索引。
+        请求，次个是响应，其后是追加帧。挂载时即记录各自在会话中的包
+        序号，供 manifest 索引。
         """
         artifact = next((a for a in self.artifacts if a.id == artifact_id), None)
         if artifact is None:
             raise KeyError(f"未登记的产物 id：{artifact_id!r}")
         if not packets:
             raise ValueError(f"产物 {artifact_id!r} 至少要挂一个包")
+        roles = frame_roles(artifact)
+        if len(packets) != len(roles):
+            raise ValueError(
+                f"产物 {artifact_id!r} 有 {len(roles)} 帧，却挂了 {len(packets)} 个包"
+            )
         key = _session_key(artifact)
         session = self._packets.setdefault(key, [])
         for offset, packet in enumerate(packets):
@@ -3681,6 +3821,7 @@ class DatasetBuilder:
             self._packets,
             self._positions,
             self._response_positions,
+            self.transport,
         )
 
 
@@ -3691,6 +3832,7 @@ def write_dataset(
     packets: dict[str, list[bytes]],
     positions: dict[str, tuple[str, int]] | None = None,
     response_positions: dict[str, tuple[str, int]] | None = None,
+    transport: dict[str, Any] | None = None,
 ) -> Path:
     """写出分层数据集与 manifest.json。
 
@@ -3700,6 +3842,9 @@ def write_dataset(
 
     只有 positions 命中的产物才会带上 ``pcap_file`` / ``pcap_index`` 字段；
     直接调用本函数而不传 positions 时，manifest 里不会有包位置信息。
+
+    transport 是本次会话的传输层参数，写进 manifest 后，派生数据集（如
+    变异数据集）可以据此原样重建链路封装。
     """
     root.mkdir(parents=True, exist_ok=True)
     positions = positions or {}
@@ -3707,6 +3852,7 @@ def write_dataset(
 
     counts: dict[str, int] = {}
     entries: list[dict[str, Any]] = []
+    directions = _session_directions(artifacts, positions)
 
     for artifact in artifacts:
         tier_dir = root / _session_key(artifact)
@@ -3730,6 +3876,7 @@ def write_dataset(
             key, index = position
             entry["pcap_file"] = f"{key}/session.pcap"
             entry["pcap_index"] = index
+            entry["pcap_frame_count"] = len(frame_roles(artifact))
         if artifact.response is not None:
             write_raw(frames_dir, f"{artifact.id}.resp", artifact.response)
             entry["resp_len"] = len(artifact.response)
@@ -3738,28 +3885,71 @@ def write_dataset(
         if response_position is not None:
             _, index = response_position
             entry["pcap_resp_index"] = index
+        for offset, frame in enumerate(artifact.extra_frames, start=2):
+            write_raw(frames_dir, f"{artifact.id}.frame{offset}", frame)
         if artifact.parent_id is not None:
             entry["parent_id"] = artifact.parent_id
         if artifact.mutation is not None:
             entry["mutation"] = artifact.mutation
         entries.append(entry)
 
+    serial = bool(transport) and transport.get("kind") == "serial"
     for key, plist in packets.items():
         tier, transport_dir = key.split("/", 1)
-        write_pcap(root / tier / transport_dir / "session.pcap", plist)
+        path = root / tier / transport_dir / "session.pcap"
+        if serial:
+            session_dirs = directions.get(key, [])
+            write_pcap(
+                path,
+                [
+                    sll_header(outgoing=session_dirs[index] if index < len(session_dirs) else True)
+                    + packet
+                    for index, packet in enumerate(plist)
+                ],
+                link_type=LINKTYPE_LINUX_SLL,
+            )
+        else:
+            write_pcap(path, plist, link_type=LINKTYPE_ETHERNET)
 
-    manifest = {
+    manifest: dict[str, Any] = {
         "dataset": name,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "protocols": sorted({artifact.protocol for artifact in artifacts}),
         "counts": counts,
         "artifacts": entries,
     }
+    if transport is not None:
+        manifest["transport"] = transport
     (root / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     return root
-```
+
+
+def _session_directions(
+    artifacts: list[Artifact], positions: dict[str, tuple[str, int]]
+) -> dict[str, list[bool]]:
+    """推导每个会话里各包的方向。
+
+    产物在会话里的包是连续的，方向由产物自身的帧序决定：请求由客户端
+    发出，应答由服务端回送，追加帧是客户端的重放。
+    """
+    directions: dict[str, list[bool]] = {}
+    for artifact in artifacts:
+        position = positions.get(artifact.id)
+        if position is None:
+            continue
+        key, index = position
+        session_dirs = directions.setdefault(key, [])
+        while len(session_dirs) < index:
+            session_dirs.append(True)
+        for offset, role in enumerate(frame_roles(artifact)):
+            target = index + offset
+            if target < len(session_dirs):
+                session_dirs[target] = role
+            else:
+                session_dirs.append(role)
+    return directions```
 
 - [ ] **Step 4: 运行测试确认通过**
 
@@ -3794,15 +3984,16 @@ EOF
 **Interfaces:**
 - Consumes: 无
 - Produces:
-  - `icsgen.mutate.rules.MutationRule`：`frozen dataclass`，字段 `name: str`、`description: str`、`apply: Callable[[bytes, random.Random], bytes | None]`
+  - `icsgen.mutate.rules.MutationRule`：`frozen dataclass`，字段 `name: str`、`description: str`、`apply: Callable[[Sequence[bytes], random.Random], Sequence[bytes] | None]`
   - `icsgen.mutate.rules.RULES: dict[str, MutationRule]` —— 12 条规则
   - `icsgen.mutate.rules.RULE_NAMES: tuple[str, ...]`
-  - `icsgen.mutate.engine.MutatedFrame`：`frozen dataclass`，字段 `payload: bytes`、`rule: str`、`seed: int`、`offset: int`、`original_sha256: str`
+  - `icsgen.mutate.engine.MutatedFrame`：`frozen dataclass`，字段 `frames: tuple[bytes, ...]`、`rule: str`、`seed: int`、`offset: int`、`original_sha256: str`；另有只读属性 `payload`（等价于 `frames[0]`）
   - `icsgen.mutate.engine.mutate(payload: bytes, rules: list[str], seed: int) -> list[MutatedFrame]` —— 规则名为 `all` 时应用全部规则
+  - `icsgen.mutate.engine.mutate_frames(frames: Sequence[bytes], rules: list[str], seed: int) -> list[MutatedFrame]` —— 对整段会话的帧序列做变异
 
 **12 条规则**：`bit_flip`、`byte_flip`、`byte_set`、`truncate`、`extend_garbage`、`length_field_corrupt`、`func_code_corrupt`、`address_corrupt`、`value_extreme`、`crc_corrupt`、`duplicate_replay`、`interleave_frames`
 
-其中 `duplicate_replay` 与 `interleave_frames` 需要成对输入，对单帧输入退化为 `byte_flip` 的等价行为；实现上这两条规则在只有单帧时返回 `None`（不产生变异），由引擎跳过。
+变异的对象是**一段会话的帧序列**：单帧规则只改首帧、其余帧原样保留；成对规则（`duplicate_replay` / `interleave_frames`）重排整段会话。规则返回变异后的帧序列，帧序约定为「请求在前、应答在后」，成对规则产生的新帧追加在末尾。`duplicate_replay` 与 `interleave_frames` 需要成对输入，只有单帧时返回 `None`（不产生变异），由引擎跳过。
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -3813,7 +4004,7 @@ EOF
 
 import pytest
 
-from icsgen.mutate.engine import mutate
+from icsgen.mutate.engine import mutate, mutate_frames
 from icsgen.mutate.rules import RULE_NAMES
 
 
@@ -3881,7 +4072,69 @@ def test_mutated_payload_differs_from_original():
 def test_unknown_rule_raises():
     with pytest.raises(KeyError):
         mutate(b"\x00", ["no_such_rule"], seed=1)
-```
+
+
+def test_paired_rules_need_at_least_two_frames():
+    """成对规则在单帧输入下不适用。"""
+    assert mutate_frames([b"\x00\x01"], ["duplicate_replay"], seed=1) == []
+    assert mutate_frames([b"\x00\x01"], ["interleave_frames"], seed=1) == []
+
+
+def test_duplicate_replay_repeats_first_frame():
+    """重放：在会话末尾把首帧原样再发一次。"""
+    frames = [b"\xaa\xbb", b"\x11\x22"]
+    result = mutate_frames(frames, ["duplicate_replay"], seed=1)
+    assert len(result) == 1
+    assert result[0].frames == (b"\xaa\xbb", b"\x11\x22", b"\xaa\xbb")
+
+
+def test_interleave_frames_alternates_bytes():
+    """交错：前两帧的字节轮流出现，合并成一帧。"""
+    frames = [b"\xaa\xbb", b"\x11\x22"]
+    result = mutate_frames(frames, ["interleave_frames"], seed=1)
+    assert len(result) == 1
+    assert result[0].frames == (b"\xaa\x11\xbb\x22",)
+
+
+def test_single_frame_rules_keep_the_other_frames():
+    """单帧规则只改首帧，其余帧原样保留。"""
+    frames = [b"\x00\x01\x02", b"\x09\x08"]
+    result = mutate_frames(frames, ["bit_flip"], seed=1)
+    assert len(result) == 1
+    assert result[0].frames[0] != frames[0]
+    assert result[0].frames[1] == frames[1]
+
+
+def test_paired_rules_keep_request_and_response_in_place():
+    """成对规则产生的新帧追加在末尾，请求与应答的位置不漂移。"""
+    frames = [b"\xaa\xbb", b"\x11\x22"]
+    result = mutate_frames(frames, ["duplicate_replay"], seed=1)[0]
+    assert result.frames[0] == frames[0]
+    assert result.frames[1] == frames[1]
+
+
+def test_every_rule_applies_on_a_paired_session():
+    """成对输入下每条规则都能产生变异。"""
+    frames = [b"\x00\x01\x00\x00\x00\x06\x01\x03\x00\x00\x00\x03", b"\x01\x03\x06\x00\x01"]
+    for name in RULE_NAMES:
+        results = mutate_frames(frames, [name], seed=7)
+        assert results, f"规则 {name} 未产生任何变异"
+
+
+def test_mutate_frames_is_deterministic():
+    frames = [bytes(range(10)), bytes(range(5))]
+    first = mutate_frames(frames, ["all"], seed=7)
+    second = mutate_frames(frames, ["all"], seed=7)
+    assert [m.frames for m in first] == [m.frames for m in second]
+
+
+def test_mutate_frames_records_hash_of_the_whole_session():
+    """溯源信息按整段会话计算，而不是只看首帧。"""
+    import hashlib
+
+    frames = [b"\x01\x02", b"\x03\x04"]
+    result = mutate_frames(frames, ["bit_flip"], seed=1)[0]
+    assert result.original_sha256 == hashlib.sha256(b"\x01\x02\x03\x04").hexdigest()```
 
 - [ ] **Step 2: 运行测试确认失败**
 
@@ -3897,8 +4150,15 @@ Expected: FAIL —— `ModuleNotFoundError: No module named 'icsgen.mutate'`
 ```python
 """变异规则集。
 
-每条规则接收原始字节与随机数发生器，返回变异后的字节；返回 None 表示
+每条规则接收一串帧与随机数发生器，返回变异后的帧序列；返回 None 表示
 该规则在当前输入上不适用（例如需要成对帧的规则遇到单帧）。
+
+规则的输入是「一段会话的帧序列」：单帧规则只改首帧、其余帧原样保留；
+成对规则（重放、交错）重排整段会话。单帧调用方用 mutate_frames 的
+frames=[单帧] 形式即可，语义与多帧一致。
+
+帧序列的约定是「请求在前、应答在后」：成对规则产生的新帧一律追加在
+末尾，这样请求帧与应答帧的位置不会漂移，产物才能与源产物一一对应。
 """
 
 from __future__ import annotations
@@ -3907,6 +4167,12 @@ import random
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
+#: 规则作用于会话的首帧
+FrameRule = Callable[[bytes, random.Random], bytes | None]
+
+#: 规则作用于整段会话，返回变异后的帧序列
+SessionRule = Callable[[Sequence[bytes], random.Random], Sequence[bytes] | None]
+
 
 @dataclass(frozen=True)
 class MutationRule:
@@ -3914,7 +4180,7 @@ class MutationRule:
 
     name: str
     description: str
-    apply: Callable[[bytes, random.Random], bytes | None]
+    apply: SessionRule
 
 
 def _different_value(current: int, rng: random.Random, candidates: Sequence[int]) -> int:
@@ -4015,37 +4281,75 @@ def _crc_corrupt(data: bytes, rng: random.Random) -> bytes | None:
     return bytes(buf)
 
 
-def _duplicate_replay(data: bytes, rng: random.Random) -> bytes | None:
-    """复制整帧形成重放，需要成对输入，单帧时不适用。"""
-    return None
+def _single_frame(rule: FrameRule) -> SessionRule:
+    """把作用在单帧上的规则包成作用于整段会话的规则。
+
+    只改首帧，其余帧原样保留 —— 变异的是这次交互的请求，响应仍是设备
+    对合法请求的正常应答。
+    """
+
+    def apply(frames: Sequence[bytes], rng: random.Random) -> Sequence[bytes] | None:
+        if not frames:
+            return None
+        mutated = rule(frames[0], rng)
+        if mutated is None:
+            return None
+        return [mutated, *frames[1:]]
+
+    return apply
 
 
-def _interleave_frames(data: bytes, rng: random.Random) -> bytes | None:
-    """交错两帧，需要成对输入，单帧时不适用。"""
-    return None
+def _duplicate_replay(frames: Sequence[bytes], rng: random.Random) -> Sequence[bytes] | None:
+    """重放：在会话末尾把首帧原样再发一次。
+
+    客户端拿到应答后重放同一请求，是重放攻击的典型形态。首帧追加到末尾
+    而不是插到最前，请求帧与应答帧的相对位置保持不变。
+
+    需要成对输入：单帧没有可重放的上下文。
+    """
+    if len(frames) < 2:
+        return None
+    return [*frames, frames[0]]
+
+
+def _interleave_frames(frames: Sequence[bytes], rng: random.Random) -> Sequence[bytes] | None:
+    """交错：前两帧的字节轮流出现，合并成一帧。
+
+    交错破坏了两帧的边界，合并后的帧不再能拆回请求与应答，其余帧原样
+    保留。
+
+    需要成对输入：单帧没有可交错的另一帧。
+    """
+    if len(frames) < 2:
+        return None
+    out = bytearray()
+    for group in zip(frames[0], frames[1]):
+        out += bytes(group)
+    return [bytes(out), *frames[2:]]
 
 
 RULES: dict[str, MutationRule] = {
     rule.name: rule
     for rule in (
-        MutationRule("bit_flip", "翻转随机 bit", _bit_flip),
-        MutationRule("byte_flip", "随机字节取反", _byte_flip),
-        MutationRule("byte_set", "随机字节替换为随机值", _byte_set),
-        MutationRule("truncate", "截断到随机长度", _truncate),
-        MutationRule("extend_garbage", "追加随机垃圾字节", _extend_garbage),
-        MutationRule("length_field_corrupt", "篡改长度字段", _length_field_corrupt),
-        MutationRule("func_code_corrupt", "篡改功能码", _func_code_corrupt),
-        MutationRule("address_corrupt", "篡改地址字段", _address_corrupt),
-        MutationRule("value_extreme", "数值置为极值", _value_extreme),
-        MutationRule("crc_corrupt", "破坏 CRC 字节", _crc_corrupt),
+        MutationRule("bit_flip", "翻转随机 bit", _single_frame(_bit_flip)),
+        MutationRule("byte_flip", "随机字节取反", _single_frame(_byte_flip)),
+        MutationRule("byte_set", "随机字节替换为随机值", _single_frame(_byte_set)),
+        MutationRule("truncate", "截断到随机长度", _single_frame(_truncate)),
+        MutationRule("extend_garbage", "追加随机垃圾字节", _single_frame(_extend_garbage)),
+        MutationRule(
+            "length_field_corrupt", "篡改长度字段", _single_frame(_length_field_corrupt)
+        ),
+        MutationRule("func_code_corrupt", "篡改功能码", _single_frame(_func_code_corrupt)),
+        MutationRule("address_corrupt", "篡改地址字段", _single_frame(_address_corrupt)),
+        MutationRule("value_extreme", "数值置为极值", _single_frame(_value_extreme)),
+        MutationRule("crc_corrupt", "破坏 CRC 字节", _single_frame(_crc_corrupt)),
         MutationRule("duplicate_replay", "复制帧形成重放", _duplicate_replay),
         MutationRule("interleave_frames", "交错两帧", _interleave_frames),
     )
 }
 
 #: 全部规则名，按定义顺序
-RULE_NAMES: tuple[str, ...] = tuple(RULES)
-```
+RULE_NAMES: tuple[str, ...] = tuple(RULES)```
 
 创建 `icsgen/mutate/engine.py`：
 
@@ -4054,6 +4358,9 @@ RULE_NAMES: tuple[str, ...] = tuple(RULES)
 
 同一 seed 与同一输入必得同一输出，产物带溯源信息（规则名、seed、偏移、
 原始哈希）。
+
+变异的对象是一段会话的帧序列：单帧规则只改首帧，成对规则（重放、交错）
+重排整段会话。溯源信息按整段会话的字节流计算。
 """
 
 from __future__ import annotations
@@ -4061,23 +4368,42 @@ from __future__ import annotations
 import hashlib
 import random
 from dataclasses import dataclass
+from typing import Sequence
 
 from .rules import RULES, RULE_NAMES
 
 
 @dataclass(frozen=True)
 class MutatedFrame:
-    """一条变异产物。"""
+    """一条变异产物。
 
-    payload: bytes
+    frames 是变异后整段会话的帧序列：请求在前、应答在后。
+    """
+
+    frames: tuple[bytes, ...]
     rule: str
     seed: int
     offset: int
     original_sha256: str
 
+    @property
+    def payload(self) -> bytes:
+        """变异后的首帧。"""
+        return self.frames[0]
+
 
 def mutate(payload: bytes, rules: list[str], seed: int) -> list[MutatedFrame]:
-    """对 payload 应用给定规则，返回全部变异结果。
+    """对单个帧应用给定规则，返回全部变异结果。
+
+    需要成对帧的规则（重放、交错）在单帧输入下不适用。
+    """
+    return mutate_frames([payload], rules, seed)
+
+
+def mutate_frames(
+    frames: Sequence[bytes], rules: list[str], seed: int
+) -> list[MutatedFrame]:
+    """对一段会话的帧应用给定规则，返回全部变异结果。
 
     rules 中的 "all" 表示应用全部规则。规则名未知时抛 KeyError。
     """
@@ -4086,19 +4412,26 @@ def mutate(payload: bytes, rules: list[str], seed: int) -> list[MutatedFrame]:
         if name not in RULES:
             raise KeyError(f"不存在变异规则 {name!r}，可用规则：{list(RULE_NAMES)}")
 
-    original_hash = hashlib.sha256(payload).hexdigest()
+    original = b"".join(frames)
+    original_hash = hashlib.sha256(original).hexdigest()
     results: list[MutatedFrame] = []
 
     for name in selected:
         rule = RULES[name]
         rng = random.Random(f"{seed}:{name}")
-        mutated = rule.apply(payload, rng)
-        if mutated is None or mutated == payload:
+        mutated = rule.apply(frames, rng)
+        if mutated is None:
             continue
-        offset = _first_difference(payload, mutated)
+        mutated_frames = tuple(mutated)
+        if not mutated_frames:
+            continue
+        mutated_bytes = b"".join(mutated_frames)
+        if mutated_bytes == original:
+            continue
+        offset = _first_difference(original, mutated_bytes)
         results.append(
             MutatedFrame(
-                payload=mutated,
+                frames=mutated_frames,
                 rule=name,
                 seed=seed,
                 offset=offset,
@@ -4113,8 +4446,7 @@ def _first_difference(original: bytes, mutated: bytes) -> int:
     for index, (a, b) in enumerate(zip(original, mutated)):
         if a != b:
             return index
-    return min(len(original), len(mutated))
-```
+    return min(len(original), len(mutated))```
 
 - [ ] **Step 4: 运行测试确认通过**
 
@@ -4673,7 +5005,7 @@ EOF
 - Create: `tests/test_cli.py`
 
 **Interfaces:**
-- Consumes: `icsgen.protocols.modbus.adapter.load_modbus_adapter`（Task 11）、`icsgen.spec.catalog.load_catalog`（Task 3）、`icsgen.spec.loader.load_scenario`（Task 3）、`icsgen.generator.build_dataset`（Task 11）、`icsgen.mutate.engine.mutate`（Task 10）
+- Consumes: `icsgen.protocols.modbus.adapter.load_modbus_adapter`（Task 11）、`icsgen.spec.catalog.load_catalog`（Task 3）、`icsgen.spec.loader.load_scenario`（Task 3）、`icsgen.generator.build_dataset`（Task 11）、`icsgen.mutate.engine.mutate_frames`（Task 10）、`icsgen.emit.dataset.Artifact` / `DatasetBuilder`（Task 9）、`icsgen.transport.link.encapsulate`（Task 7）
 - Produces: `icsgen.cli.app` —— Typer 应用，命令行入口 `icsgen`
 
 **命令面**：
@@ -4688,6 +5020,8 @@ EOF
 | `icsgen serve --protocol modbus --transport tcp --port N --role client` | 启动 PLC 模拟器（Task 13 实现） |
 | `icsgen catalog --protocol modbus --count` | 统计操作类型数量（CI 防退化用） |
 
+**mutate 的语义**：变异以一次操作为单位 —— 源数据集里一条产物的请求帧与响应帧构成一段会话，规则作用于整段会话。变异结果按源 manifest 记录的 `transport` 重新封装，挂到 mutated 层的 `session.pcap` 上，mutated 层因此与 legit/abnormal 结构一致。
+
 - [ ] **Step 1: 写失败的测试**
 
 创建 `tests/test_cli.py`：
@@ -4697,6 +5031,7 @@ EOF
 
 import json
 
+from scapy.all import IP
 from typer.testing import CliRunner
 
 from icsgen.cli import app
@@ -4769,7 +5104,132 @@ def test_mutate_creates_mutated_tier(tmp_path):
     assert (dst / "manifest.json").exists()
     manifest = json.loads((dst / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["counts"].get("mutated", 0) > 0
-```
+
+
+def test_manifest_records_transport_spec(tmp_path):
+    """传输层参数写进 manifest，变异数据集据此还原链路封装。"""
+    scenario = tmp_path / "s.yaml"
+    scenario.write_text(
+        "name: demo\ntransport:\n  kind: tcp\n  src_ip: 10.0.0.1\n"
+        "  dst_ip: 10.0.0.2\n  dport: 502\noperations:\n"
+        "  - op: modbus.read_holding_registers\n    params: {quantity: 3}\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "ds"
+    runner.invoke(app, ["generate", str(scenario), "-o", str(out)])
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["transport"]["kind"] == "tcp"
+    assert manifest["transport"]["src_ip"] == "10.0.0.1"
+    assert manifest["transport"]["dst_ip"] == "10.0.0.2"
+    assert manifest["transport"]["dport"] == 502
+
+
+def test_mutated_tier_has_session_pcap(tmp_path):
+    """变异层与其它层结构一致：也要有 session.pcap。"""
+    from scapy.all import rdpcap
+
+    scenario = tmp_path / "s.yaml"
+    scenario.write_text(
+        "name: demo\ntransport:\n  kind: tcp\n  src_ip: 10.0.0.1\n"
+        "  dst_ip: 10.0.0.2\noperations:\n"
+        "  - op: modbus.read_holding_registers\n    params: {quantity: 3}\n",
+        encoding="utf-8",
+    )
+    src = tmp_path / "ds"
+    runner.invoke(app, ["generate", str(scenario), "-o", str(src)])
+    dst = tmp_path / "fuzz"
+    result = runner.invoke(
+        app, ["mutate", str(src), "-o", str(dst), "--rules", "all", "--seed", "42"]
+    )
+    assert result.exit_code == 0, result.output
+    manifest = json.loads((dst / "manifest.json").read_text(encoding="utf-8"))
+    pcap = dst / "mutated" / "modbus_tcp" / "session.pcap"
+    assert pcap.exists()
+    packets = rdpcap(str(pcap))
+    expected = sum(entry["pcap_frame_count"] for entry in manifest["artifacts"])
+    assert len(packets) == expected
+    # 链路参数沿用源数据集
+    assert packets[0][IP].src == "10.0.0.1"
+    assert packets[0][IP].dst == "10.0.0.2"
+
+
+def test_mutated_artifact_points_at_its_packet(tmp_path):
+    """manifest 里能定位到变异产物所在的包。"""
+    from scapy.all import TCP, rdpcap
+
+    scenario = tmp_path / "s.yaml"
+    scenario.write_text(
+        "name: demo\ntransport:\n  kind: tcp\noperations:\n"
+        "  - op: modbus.read_holding_registers\n    params: {quantity: 3}\n",
+        encoding="utf-8",
+    )
+    src = tmp_path / "ds"
+    runner.invoke(app, ["generate", str(scenario), "-o", str(src)])
+    dst = tmp_path / "fuzz"
+    runner.invoke(app, ["mutate", str(src), "-o", str(dst), "--rules", "all", "--seed", "42"])
+    manifest = json.loads((dst / "manifest.json").read_text(encoding="utf-8"))
+    packets = rdpcap(str(dst / "mutated" / "modbus_tcp" / "session.pcap"))
+    frames = dst / "mutated" / "modbus_tcp" / "frames"
+    for entry in manifest["artifacts"]:
+        assert entry["pcap_file"] == "mutated/modbus_tcp/session.pcap"
+        assert entry["mutation"]["rule"]
+        assert entry["parent_id"]
+        request = (frames / f"{entry['id']}.bin").read_bytes()
+        assert bytes(packets[entry["pcap_index"]][TCP].payload) == request
+        if "pcap_resp_index" in entry:
+            response = (frames / f"{entry['id']}.resp.bin").read_bytes()
+            assert bytes(packets[entry["pcap_resp_index"]][TCP].payload) == response
+
+
+def test_replay_rule_adds_a_third_packet(tmp_path):
+    """重放规则在会话末尾追加一帧，产物记录三帧。"""
+    from scapy.all import TCP, rdpcap
+
+    scenario = tmp_path / "s.yaml"
+    scenario.write_text(
+        "name: demo\ntransport:\n  kind: tcp\noperations:\n"
+        "  - op: modbus.read_holding_registers\n    params: {quantity: 3}\n",
+        encoding="utf-8",
+    )
+    src = tmp_path / "ds"
+    runner.invoke(app, ["generate", str(scenario), "-o", str(src)])
+    dst = tmp_path / "fuzz"
+    runner.invoke(
+        app,
+        ["mutate", str(src), "-o", str(dst), "--rules", "duplicate_replay", "--seed", "1"],
+    )
+    manifest = json.loads((dst / "manifest.json").read_text(encoding="utf-8"))
+    entry = manifest["artifacts"][0]
+    assert entry["pcap_frame_count"] == 3
+    packets = rdpcap(str(dst / "mutated" / "modbus_tcp" / "session.pcap"))
+    assert len(packets) == 3
+    # 重放的是原请求帧
+    request = (dst / "mutated" / "modbus_tcp" / "frames" / f"{entry['id']}.bin").read_bytes()
+    assert bytes(packets[2][TCP].payload) == request
+
+
+def test_serial_dataset_pcap_uses_linux_sll(tmp_path):
+    """串口传输的 pcap 以 Linux SLL 记录，帧体是裸协议字节。"""
+    scenario = tmp_path / "s.yaml"
+    scenario.write_text(
+        "name: demo\ntransport:\n  kind: serial\noperations:\n"
+        "  - op: modbus.read_holding_registers\n    params: {quantity: 3}\n",
+        encoding="utf-8",
+    )
+    src = tmp_path / "ds"
+    runner.invoke(app, ["generate", str(scenario), "-o", str(src)])
+    dst = tmp_path / "fuzz"
+    runner.invoke(app, ["mutate", str(src), "-o", str(dst), "--rules", "all", "--seed", "42"])
+    for pcap in (src / "legit" / "modbus_rtu" / "session.pcap", dst / "mutated" / "modbus_rtu" / "session.pcap"):
+        assert pcap.exists()
+        # pcap 全局头第 20 字节起是链路类型
+        assert int.from_bytes(pcap.read_bytes()[20:24], "little") == 113
+    manifest = json.loads((dst / "manifest.json").read_text(encoding="utf-8"))
+    entry = manifest["artifacts"][0]
+    raw = (dst / "mutated" / "modbus_rtu" / "frames" / f"{entry['id']}.bin").read_bytes()
+    data = (dst / "mutated" / "modbus_rtu" / "session.pcap").read_bytes()
+    # SLL 头 16 字节之后是裸协议帧
+    assert raw in data```
 
 - [ ] **Step 2: 运行测试确认失败**
 
@@ -4795,12 +5255,14 @@ from typing import Any
 
 import typer
 
-from .emit.dataset import Artifact, DatasetBuilder, write_dataset
+from .emit.dataset import Artifact, DatasetBuilder, frame_roles
 from .generator import build_dataset
-from .mutate.engine import mutate
+from .mutate.engine import mutate_frames
 from .protocols.modbus.adapter import CATALOG_PATH, load_modbus_adapter
 from .spec.catalog import Catalog, load_catalog
 from .spec.loader import ScenarioError, load_scenario
+from .transport.link import encapsulate
+from .transport.spec import TransportSpec
 
 app = typer.Typer(help="ICS 工控协议流量生成器")
 ops_app = typer.Typer(help="操作类型目录")
@@ -4893,41 +5355,74 @@ def mutate_cmd(
     rules: str = typer.Option("all", "--rules", help="逗号分隔的规则名，all 表示全部"),
     seed: int = typer.Option(0, "--seed", help="随机种子"),
 ) -> None:
-    """对数据集做变异，产出 mutated 层。"""
+    """对数据集做变异，产出 mutated 层。
+
+    变异以一次操作为单位：请求帧与响应帧构成一段会话，规则作用于整段
+    会话。变异结果按源数据集的链路参数重新封装，进入 mutated 层的
+    session.pcap，与其它层保持同样的目录结构。
+    """
     manifest_path = dataset / "manifest.json"
     if not manifest_path.exists():
         typer.echo(f"找不到 {manifest_path}", err=True)
         raise typer.Exit(code=1)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
-    builder = DatasetBuilder(manifest.get("dataset", dataset.name), output)
+    transport = manifest.get("transport")
+    spec = TransportSpec.from_dict(transport) if transport else None
+    if spec is None:
+        typer.echo("源数据集未记录传输层参数，mutated 层不生成 session.pcap", err=True)
+    builder = DatasetBuilder(
+        manifest.get("dataset", dataset.name), output, transport=transport
+    )
     rule_names = [r.strip() for r in rules.split(",") if r.strip()]
 
+    seq = 0
     for entry in manifest["artifacts"]:
-        source = dataset / entry["tier"] / f"{entry['protocol']}_{entry['transport']}" / "frames" / f"{entry['id']}.bin"
-        if not source.exists():
+        frames_dir = (
+            dataset / entry["tier"] / f"{entry['protocol']}_{entry['transport']}" / "frames"
+        )
+        request_path = frames_dir / f"{entry['id']}.bin"
+        if not request_path.exists():
             continue
-        payload = source.read_bytes()
-        for mutated in mutate(payload, rule_names, seed):
-            builder.add(
-                Artifact(
-                    id=f"{entry['id']}~{mutated.rule}",
-                    protocol=entry["protocol"],
-                    transport=entry["transport"],
-                    op=entry["op"],
-                    variant=entry["variant"],
-                    tier="mutated",
-                    payload=mutated.payload,
-                    metadata=entry.get("meta", {}),
-                    parent_id=entry["id"],
-                    mutation={
-                        "rule": mutated.rule,
-                        "seed": mutated.seed,
-                        "offset": mutated.offset,
-                        "original_sha256": mutated.original_sha256,
-                    },
-                )
+        source_frames = [request_path.read_bytes()]
+        response_path = frames_dir / f"{entry['id']}.resp.bin"
+        if response_path.exists():
+            source_frames.append(response_path.read_bytes())
+        try:
+            mutated_frames = mutate_frames(source_frames, rule_names, seed)
+        except KeyError as exc:
+            typer.echo(f"变异规则名非法: {exc}", err=True)
+            raise typer.Exit(code=1)
+        for mutated in mutated_frames:
+            frames = list(mutated.frames)
+            artifact = Artifact(
+                id=f"{entry['id']}~{mutated.rule}",
+                protocol=entry["protocol"],
+                transport=entry["transport"],
+                op=entry["op"],
+                variant=entry["variant"],
+                tier="mutated",
+                payload=frames[0],
+                response=frames[1] if len(frames) > 1 else None,
+                extra_frames=tuple(frames[2:]),
+                metadata=entry.get("meta", {}),
+                parent_id=entry["id"],
+                mutation={
+                    "rule": mutated.rule,
+                    "seed": mutated.seed,
+                    "offset": mutated.offset,
+                    "original_sha256": mutated.original_sha256,
+                },
             )
+            builder.add(artifact)
+            if spec is None:
+                continue
+            packets = []
+            for frame, outgoing in zip(frames, frame_roles(artifact)):
+                direction = spec if outgoing else spec.reversed()
+                packets.append(encapsulate(frame, direction, seq=seq, ack=seq))
+                seq += len(frame)
+            builder.add_linked_packets(artifact.id, packets)
     root = builder.write()
     typer.echo(f"已生成变异数据集: {root}")
 
@@ -4959,8 +5454,7 @@ def serve(
     """启动 PLC 服务端模拟。"""
     from .server.modbus_server import run_modbus_server
 
-    run_modbus_server(transport=transport, host=host, port=port, role=role)
-```
+    run_modbus_server(transport=transport, host=host, port=port, role=role)```
 
 - [ ] **Step 4: 运行测试确认通过**
 
@@ -5486,6 +5980,20 @@ datasets/demo/
 - **`.pcap` 是完整链路帧**，请求与响应成对连续，保留会话连贯性，便于人工分析与规则引擎回放。
 - **一次操作 = 一个 Artifact**：请求与响应同属一条记录，manifest 记 `pcap_index` 与 `pcap_resp_index`。
 - **`legit` / `abnormal` / `mutated` 三层互不污染**，manifest 记录每条产物的 tier。
+- **串口传输的 pcap 用 Linux SLL 记录**，帧体是裸 RTU 字节，与 spec §10 一致。
+
+## 变异引擎
+
+变异以**一次操作**为单位：请求帧与响应帧构成一段会话，规则作用于整段会话。
+
+```bash
+icsgen mutate datasets/demo -o datasets/fuzz --rules all --seed 42
+```
+
+- 单帧规则（`bit_flip`、`truncate`、`func_code_corrupt` 等 10 条）只改请求帧，响应保持设备对合法请求的正常应答。
+- 成对规则作用于整段会话：`duplicate_replay` 在会话末尾重放请求帧，`interleave_frames` 把请求与响应逐字节交错、合并成一帧。
+- 变异结果按源数据集 manifest 里记录的链路参数重新封装，进入 `mutated` 层的 `session.pcap`，与其它层结构一致。
+- 同一 seed 与同一输入必得同一输出；产物记录 `mutation` 溯源（规则名、seed、偏移、原始哈希）。
 
 ## 语义层与变体
 
@@ -5519,6 +6027,7 @@ icsgen serve --protocol modbus --transport tcp --port 5020 --role client
 ## 后续阶段
 
 P1 已交付 Modbus TCP/RTU。后续按 P2（EtherNet/IP + CIP）、P3（S7comm）、
+P4（Profinet / OPC UA / IEC104）推进，核心抽象不变。
 P4（Profinet / OPC UA / IEC104）推进，核心抽象不变。
 ````
 
@@ -5570,16 +6079,14 @@ EOF
 
 **编写过程中发现并已修正的问题**：
 
-1. `duplicate_replay` 与 `interleave_frames` 需要成对输入，单帧时返回 `None`；原测试断言"每条规则都产生变异"对这两条不成立 —— 已在 Task 10 的测试中把它们排除并单独断言空结果。
+1. `duplicate_replay` 与 `interleave_frames` 需要成对输入，单帧时返回 `None`；原测试断言"每条规则都产生变异"对这两条不成立 —— 已在 Task 10 的测试中把它们排除并单独断言空结果。**后续已改为会话级变异**：规则的输入是一段会话的帧序列，成对规则在成对输入下真正生效（见第 8 条）。
 2. `ModbusTcpServer` 没有 `start()` 方法，只有 `serve_forever()` 与 `shutdown()`；原先用线程包裹 `StartTcpServer` 的写法停止不可靠 —— 已改为 `ModbusTcpServer` + `shutdown()`。按 pymodbus 3.16 实测再修正：`serve_forever()` 与 `shutdown()` 都是**协程**，且服务端构造需要一个正在运行的事件循环，因此同步的 start/stop 契约必须包在「独立线程里的事件循环」之外（详见第 7 条）。
 3. 响应数组的长度无法从请求字段直接推导（FC03 响应的 values 会算成 0 个元素）—— 已给 `Field` 增加 `len_from_request` 声明，并把 `_build_response` 改为两遍处理（先数组、后长度字段）。
 4. **请求内数组的长度必须跟随同帧的计数标量** —— FC0F/FC10/FC17 的请求数组与长度字段互为环状引用，唯一不自相矛盾的依据是同帧的计数标量（`quantity` / `write_quantity`）。布局用 `len_from_request` 声明这条协议结构关系，变体层把数组对齐到计数标量推出的长度（不足补零、超出截断）。**字节布局不变** —— 编解码内核不读这两个字段。
 5. **计划原本只产请求帧，没有响应帧** —— 与 spec §7「异常响应作为独立 variant 生成」、§11.1「请求+响应连续」、§16「验证请求-响应成对」矛盾，且 Task 9 的文档字符串已宣称「保持会话内请求/响应连续」。已补上响应路径：Task 7 的 `TransportSpec.reversed()`、Task 9 的 `Artifact.response` 与 `pcap_resp_index`、Task 11 的 `ModbusAdapter.build_response`。**一次操作仍 = 一个 Artifact**，覆盖度计数不变。
 6. **写字节的变异规则可能写出与原值相同的字节** —— 引擎有 `mutated == payload` 的丢弃逻辑，于是「规则没生效」会变成**静默的空结果**（`byte_set` 命中 1/256、`func_code_corrupt` 命中 1/255、两个 16 位字段各命中 1/65536），测试 `test_every_rule_produces_a_mutation` 会随机失败。已引入 `_different_value(current, rng, candidates)`，凡是写字节的规则都先从候选值里排除原值再写回。
 7. **计划里的 pymodbus 3.16 写法有三处与实际 API 不符** —— 实测 3.16.1 后修正：(a) 客户端的 `slave=` 关键字已改名 `device_id=`；(b) 服务端是 asyncio 原生的，`serve_forever()` / `shutdown()` 都是协程且构造需要运行中的事件循环，改为在独立线程里跑事件循环，`start()` 等待监听就绪后才返回；(c) `ModbusServerContext` / `ModbusDeviceContext` / `ModbusSequentialDataBlock` 已废弃（v4 将移除），改用 `SimData` / `SimDevice`；其中 `ModbusSequentialDataBlock(0, ...)` 在 3.16 会因内部起始地址减一而抛 `TypeError`。
-
-**遗留说明**：`duplicate_replay` 与 `interleave_frames` 在 P1 保持"单帧不适用"，成对帧的变异留待 P2 起引入多帧场景后实现；届时需同步更新 Task 10 的测试与 `icsgen.mutate` 的输入接口（当前只接受单帧字节）。
-
-**另一处遗留**：变异数据集（`icsgen mutate`）只落 `frames/`，没有 `session.pcap` —— CLI 的 mutate 命令只登记 Artifact，没有为变异帧挂链路包。三个语义层里只有 mutated 层的目录结构与 legit/abnormal 不一致。要补齐需要解决一个信息缺口：manifest 没有记录源数据集的传输层参数（源/目的 IP、端口），无法原样重建链路封装；可选做法是生成时把 TransportSpec 写进 manifest，变异时据此重建。
+8. **变异引擎从「单帧」改为「会话级」，变异层补齐 `session.pcap`** —— P1 交付后复核发现两处遗留：(a) `duplicate_replay` / `interleave_frames` 因单帧输入恒不生效，12 条规则实际只有 10 条可用；(b) `icsgen mutate` 只落 `frames/`，mutated 层的目录结构与 legit/abnormal 不一致，且 manifest 没记传输层参数，无法重建链路封装。修正方式：规则的输入改为「一段会话的帧序列」（请求 + 响应），单帧规则只改首帧，成对规则重排整段会话；生成时把 `TransportSpec` 写进 manifest，变异时据此重建链路封装并把变异帧挂到 mutated 层的 `session.pcap` 上。为此 `Artifact` 增加 `extra_frames`（应答之后的追加帧，如重放帧），manifest 增加 `pcap_frame_count`。
+9. **串口传输的 pcap 链路类型与 spec §10 不符** —— spec §10 要求「串口传输以 Linux SLL 记录」，但 `write_pcap` 一直固定用 link_type 1（Ethernet），而串口帧是裸 RTU 字节，写成 Ethernet 记录会让 Wireshark 误解析。修正：`write_pcap` 支持 link_type 113，`icsgen.transport.link.sll_header` 生成 16 字节 SLL 头，写盘时按帧的方向（客户端发出 / 服务端应答）标记包类型。
 
 
