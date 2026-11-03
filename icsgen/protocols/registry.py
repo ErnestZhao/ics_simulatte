@@ -7,6 +7,7 @@ CLI 与 Web 层共用这张表。新增协议只需在这里登记一行，
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable
 
@@ -61,8 +62,13 @@ def get_protocol(name: str) -> ProtocolInfo:
         raise KeyError(f"未注册协议 {name!r}，已注册：{sorted(_REGISTRY)}") from exc
 
 
+@lru_cache(maxsize=None)
 def get_catalog(name: str) -> Catalog:
-    """取协议的操作目录。"""
+    """取协议的操作目录。
+
+    同一进程内只解析一次 YAML：Web 层每个请求都要查操作目录，
+    每次重新解析会把 YAML 解析开销摊到每一个 HTTP 请求上。
+    """
     return load_catalog(get_protocol(name).catalog_path)
 
 

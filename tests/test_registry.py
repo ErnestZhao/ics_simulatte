@@ -50,3 +50,8 @@ def test_cli_reports_unknown_protocol():
     result = CliRunner().invoke(app, ["catalog", "--protocol", "cip"])
     assert result.exit_code != 0
     assert "未注册协议" in result.output
+
+
+def test_get_catalog_is_cached_per_process():
+    """同一进程内两次取到的是同一个 catalog 对象 —— 不能每次请求都重解析 YAML。"""
+    assert get_catalog("modbus") is get_catalog("modbus")

@@ -17,6 +17,15 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _valid_id(value: Any) -> bool:
+    """账本里的 id 必须是非空字符串。
+
+    账本是磁盘上的持久化文件，会被截断、被手工改过 —— 形态不对的 id
+    不该被当成一条记录，否则「同一配置只能生成一次」的守卫会在脏数据下失效。
+    """
+    return isinstance(value, str) and bool(value)
+
+
 class Ledger:
     """一个只追加的 JSONL 账本。"""
 
@@ -109,7 +118,7 @@ class WebStore:
         order: list[str] = []
         for event in self.list_events():
             generation_id = event.get("generation_id")
-            if not generation_id:
+            if not _valid_id(generation_id):
                 continue
             if generation_id not in generations:
                 generations[generation_id] = {
@@ -146,19 +155,26 @@ class WebStore:
     def generation_for_config(self, config_id: str) -> str | None:
         """返回该配置最近一次发起的生成 id；未发起过返回 None。"""
         for event in reversed(self.list_events()):
-            if (
-                event.get("type") == "generation_started"
-                and event.get("config_id") == config_id
-            ):
-                return event.get("generation_id")
+            if event.get("type") != "generation_started":
+                continue
+            if event.get("config_id") != config_id:
+                continue
+            generation_id = event.get("generation_id")
+            if _valid_id(generation_id):
+                return generation_id
         return None
 
     def generations_by_config(self) -> dict[str, str]:
-        """配置 id → 已发起的生成 id。"""
+        """配置 id → 最近一次发起的生成 id。"""
         mapping: dict[str, str] = {}
-        for event in self.list_events():
-            if event.get("type") == "generation_started":
-                mapping[event.get("config_id")] = event.get("generation_id")
+        for event in reversed(self.list_events()):
+            if event.get("type") != "generation_started":
+                continue
+            config_id = event.get("config_id")
+            generation_id = event.get("generation_id")
+            if not _valid_id(config_id) or not _valid_id(generation_id):
+                continue
+            mapping.setdefault(config_id, generation_id)
         return mapping
 
     def generation_dir(self, generation_id: str) -> Path:

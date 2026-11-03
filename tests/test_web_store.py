@@ -241,6 +241,22 @@ def test_store_get_config_takes_latest_same_id(tmp_path):
     assert len(store.list_configs()) == 2
 
 
+def test_store_ignores_events_with_invalid_generation_id(tmp_path):
+    """generation_id / config_id 不是非空字符串的事件不算一次生成。"""
+    store = WebStore(tmp_path)
+    store.append_event({
+        "type": "generation_started", "generation_id": 42,
+        "config_id": "cfg_1", "config_name": "配置", "created_at": "t0",
+    })
+    store.append_event({
+        "type": "generation_started", "generation_id": "",
+        "config_id": "cfg_2", "config_name": "配置", "created_at": "t0",
+    })
+    assert store.list_generations() == []
+    assert store.generation_for_config("cfg_1") is None
+    assert store.generations_by_config() == {}
+
+
 def test_ledger_keeps_records_with_unicode_line_separators(tmp_path):
     """按字节切行：U+2028 之类的字符不算行分隔符，记录不能被劈成两半丢掉。
 
