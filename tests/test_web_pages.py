@@ -62,7 +62,11 @@ def test_workbench_transport_options_come_from_api(tmp_path):
         encoding="utf-8"
     )
     assert "dataset.transports" in script
-    assert '"modbus"' not in script
+    # 脚本里不得出现协议名、传输种类名或十六进制字面量 —— 一律走 API 返回的
+    # catalog（spec §7：新增协议时 Web 层不改代码）。这条是「纯 Python 约束下
+    # 能给 JS 的最强防护」：JS 没有行为测试，只能钉住它不硬编码协议事实。
+    for literal in ("modbus", "serial", "0x"):
+        assert literal not in script, literal
 
 
 def test_records_page_shows_saved_config(tmp_path):

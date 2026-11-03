@@ -244,6 +244,9 @@ def test_api_download_returns_file(client):
         if detail["status"] != "running":
             break
         time.sleep(0.05)
+    # 断言「成功」而不是「不是 running」：生成失败时要能看到真正的原因
+    # （错误文本在 detail["error"] 里），而不是炸成 IndexError。
+    assert detail["status"] == "succeeded", detail
     artifact = detail["artifacts"][0]
     # 帧文件名就是产物 id（Task 4 的 id 形如 "…#001"），'#' 必须编码。
     file_path = (
