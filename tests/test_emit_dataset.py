@@ -3,8 +3,14 @@
 import json
 
 import pytest
+from scapy.all import rdpcap
 
-from icsgen.emit.dataset import Artifact, DatasetBuilder, write_dataset
+from icsgen.emit.dataset import (
+    Artifact,
+    DatasetBuilder,
+    session_key,
+    write_dataset,
+)
 from icsgen.transport.link import encapsulate
 from icsgen.transport.spec import TransportSpec
 
@@ -223,3 +229,42 @@ def test_duplicate_artifact_id_keeps_first_registration(tmp_path):
             "modbus.read_holding_registers#001",
             [encapsulate(b"\x01", TransportSpec()), encapsulate(b"\x02", TransportSpec())],
         )
+
+
+def test_begin_session_shifts_artifact_index(tmp_path):
+    """握手占住前三个包序号，产物的 pcap_index 随之偏移。"""
+    builder = DatasetBuilder("demo", tmp_path / "ds")
+    artifact = _artifact(payload=b"\x01", response=b"\x02")
+    builder.add(artifact)
+    builder.begin_session(session_key(artifact), [b"\x00", b"\x01", b"\x02"])
+    builder.add_linked_packets(artifact.id, [b"\x10", b"\x11"])
+    root = builder.write()
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    entry = manifest["artifacts"][0]
+    assert entry["pcap_index"] == 3
+    assert entry["pcap_resp_index"] == 4
+    packets = rdpcap(str(root / "legit" / "modbus_tcp" / "session.pcap"))
+    assert len(packets) == 5
+
+
+def test_end_session_appends_teardown(tmp_path):
+    builder = DatasetBuilder("demo", tmp_path / "ds")
+    artifact = _artifact(payload=b"\x01", response=b"\x02")
+    builder.add(artifact)
+    builder.begin_session(session_key(artifact), [b"\x00", b"\x01", b"\x02"])
+    builder.add_linked_packets(artifact.id, [b"\x10", b"\x11"])
+    builder.end_session(session_key(artifact), [b"\x20", b"\x21", b"\x22", b"\x23"])
+    root = builder.write()
+    packets = rdpcap(str(root / "legit" / "modbus_tcp" / "session.pcap"))
+    assert len(packets) == 9
+
+
+def test_begin_session_rejects_a_started_session(tmp_path):
+    builder = DatasetBuilder("demo", tmp_path / "ds")
+    builder.begin_session("legit/modbus_tcp", [b"\x00"])
+    try:
+        builder.begin_session("legit/modbus_tcp", [b"\x01"])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("已经起头的会话不应再插入前导包")

@@ -169,8 +169,8 @@ def test_dataset_pairs_request_and_response(tmp_path):
     root = build_dataset(scenario, adapter, tmp_path / "ds", name="demo")
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
     entry = manifest["artifacts"][0]
-    assert entry["pcap_index"] == 0
-    assert entry["pcap_resp_index"] == 1
+    assert entry["pcap_index"] == 3
+    assert entry["pcap_resp_index"] == 4
     assert entry["resp_len"] > 0
     frames = root / "legit" / "modbus_tcp" / "frames"
     assert (frames / f"{entry['id']}.resp.bin").exists()
@@ -223,14 +223,23 @@ def test_transaction_id_wraps_after_65536(tmp_path, monkeypatch):
         def build_response(self, op, ctx):
             return inner.build_response(op, ctx)
 
-    # 这三处打桩依赖被测模块以「模块级 from ... import ...」绑定这些名字：
-    # icsgen/generator.py 的 encapsulate、icsgen/emit/dataset.py 的 write_raw/write_pcap。
+    # 这几处打桩依赖被测模块以「模块级 from ... import ...」绑定这些名字：
+    # icsgen/generator.py 的 encapsulate、icsgen/transport/session.py 的
+    # encapsulate、icsgen/emit/dataset.py 的 write_raw/write_pcap。
     # 若它们改成函数内局部 import，模块属性上的桩会被局部绑定遮蔽而**静默失效** ——
     # 用例照样通过，只是跑回真实的封装与写盘，测试从秒级掉回分钟级。
-    # 这是该用例的隐式契约，改那两个模块的导入形式时必须同步改这里。
+    # 这是该用例的隐式契约，改那几个模块的导入形式时必须同步改这里。
+    #
+    # TCP 路径的封装现在发生在 icsgen.transport.session 里（由 TcpSession
+    # 调用），两个模块的 encapsulate 桩都要打，否则 13 万次真实 Scapy 封装
+    # 会把该用例从秒级拖到分钟级。
+    monkeypatch.setattr(
+        "icsgen.transport.session.encapsulate",
+        lambda payload, spec, seq=0, ack=0, flags="PA": b"\x00",
+    )
     monkeypatch.setattr(
         "icsgen.generator.encapsulate",
-        lambda payload, spec, seq=0, ack=0: b"\x00",
+        lambda payload, spec, seq=0, ack=0, flags="PA": b"\x00",
     )
     monkeypatch.setattr("icsgen.emit.dataset.write_raw", lambda *a, **k: None)
     monkeypatch.setattr("icsgen.emit.dataset.write_pcap", lambda *a, **k: None)
@@ -250,3 +259,61 @@ def test_transaction_id_wraps_after_65536(tmp_path, monkeypatch):
     assert captured[65536] == 0
     assert captured[65537] == 1
     assert max(captured) <= 0xFFFF
+
+
+def test_tcp_session_starts_with_handshake_and_ends_with_teardown(tmp_path):
+    """TCP 会话文件是一次完整的连接：握手 → 数据 → 挥手。"""
+    from scapy.all import IP, TCP, rdpcap
+
+    from icsgen.spec.model import Operation
+
+    adapter = load_modbus_adapter()
+    scenario = Scenario(
+        name="demo",
+        transport={"kind": "tcp"},
+        operations=(Operation(op="modbus.read_holding_registers", params={"quantity": 3}),),
+    )
+    root = build_dataset(scenario, adapter, tmp_path / "ds", name="demo")
+    packets = rdpcap(str(root / "legit" / "modbus_tcp" / "session.pcap"))
+    flags = [p[TCP].flags for p in packets]
+    assert flags[:3] == ["S", "SA", "A"]
+    assert flags[-4:] == ["FA", "A", "FA", "A"]
+    assert all(flag == "PA" for flag in flags[3:-4])
+    assert len(packets) == 3 + 2 + 4
+
+
+def test_tcp_session_sequence_numbers_are_coherent(tmp_path):
+    """双方序号各自严格递增；数据段按载荷长度推进，ack 是对端当前序号。"""
+    from scapy.all import IP, TCP, rdpcap
+
+    from icsgen.spec.model import Operation
+
+    adapter = load_modbus_adapter()
+    scenario = Scenario(
+        name="demo",
+        transport={"kind": "tcp"},
+        operations=(
+            Operation(op="modbus.read_holding_registers", params={"quantity": 3}),
+            Operation(op="modbus.write_multiple_registers", params={"quantity": 2}),
+        ),
+    )
+    root = build_dataset(scenario, adapter, tmp_path / "ds", name="demo")
+    packets = rdpcap(str(root / "legit" / "modbus_tcp" / "session.pcap"))
+    # 按 IP 判定方向：客户端源端口比目的端口大，不能用端口大小判
+    client = [p[TCP] for p in packets if p[IP].src == "192.168.1.10"]
+    server = [p[TCP] for p in packets if p[IP].src == "192.168.1.20"]
+    # 握手 3 包（客户端 S/A、服务端 SA）+ 数据 4 包（2 请求 2 应答）
+    # + 挥手 4 包（客户端 FA/A、服务端 A/FA）= 客户端 6 包、服务端 5 包
+    assert len(client) == 6
+    assert len(server) == 5
+    assert [t.seq for t in client] == sorted(t.seq for t in client)
+    assert [t.seq for t in server] == sorted(t.seq for t in server)
+    # SYN 占掉客户端一个序号：第一个数据段的 seq 是 ISN+1
+    data_client = [t for t in client if t.flags == "PA"]
+    assert data_client[0].seq == 0x1001
+    assert data_client[0].ack == 0x2001
+    assert data_client[1].seq == 0x1001 + len(bytes(data_client[0].payload))
+    # FIN 之前的所有数据都算进了序号
+    fin = [t for t in client if t.flags == "FA"]
+    assert len(fin) == 1
+    assert fin[0].seq == 0x1001 + sum(len(bytes(t.payload)) for t in data_client)

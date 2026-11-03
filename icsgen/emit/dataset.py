@@ -46,7 +46,7 @@ def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _session_key(artifact: Artifact) -> str:
+def session_key(artifact: Artifact) -> str:
     """会话键：tier/protocol_transport。
 
     目录路径与 manifest 里的 pcap 索引都从这里派生，避免两处各写一遍
@@ -106,7 +106,7 @@ class DatasetBuilder:
             raise ValueError(
                 f"产物 {artifact_id!r} 有 {len(roles)} 帧，却挂了 {len(packets)} 个包"
             )
-        key = _session_key(artifact)
+        key = session_key(artifact)
         session = self._packets.setdefault(key, [])
         for offset, packet in enumerate(packets):
             index = len(session)
@@ -115,6 +115,21 @@ class DatasetBuilder:
                 self._positions[artifact_id] = (key, index)
             elif offset == 1:
                 self._response_positions[artifact_id] = (key, index)
+
+    def begin_session(self, key: str, packets: list[bytes]) -> None:
+        """会话的前导包（TCP 握手）。
+
+        必须在该会话的任何产物挂进来之前调用 —— 前导包要占住包序号，
+        产物的 pcap_index 由此偏移。
+        """
+        session = self._packets.setdefault(key, [])
+        if session:
+            raise ValueError(f"会话 {key!r} 已经有包了，不能再插入前导包")
+        session.extend(packets)
+
+    def end_session(self, key: str, packets: list[bytes]) -> None:
+        """会话的收尾包（TCP 挥手）。"""
+        self._packets.setdefault(key, []).extend(packets)
 
     def write(self) -> Path:
         """写出数据集目录，返回根路径。"""
@@ -159,7 +174,7 @@ def write_dataset(
     directions = _session_directions(artifacts, positions)
 
     for artifact in artifacts:
-        tier_dir = root / _session_key(artifact)
+        tier_dir = root / session_key(artifact)
         frames_dir = tier_dir / "frames"
         write_raw(frames_dir, artifact.id, artifact.payload)
 

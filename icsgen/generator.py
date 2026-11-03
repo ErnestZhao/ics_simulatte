@@ -9,16 +9,15 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
-from .emit.dataset import Artifact, DatasetBuilder
+from .emit.dataset import Artifact, DatasetBuilder, session_key
 from .protocols.base import BuildContext, ProtocolAdapter
 from .spec.model import Scenario
 from .transport.link import encapsulate
+from .transport.session import TcpSession
 from .transport.spec import TransportSpec
 
 #: Modbus MBAP 的事务 id 占 2 字节，越界要回绕而不是崩掉
 _TRANSACTION_ID_MODULO = 0x10000
-#: TCP 序列号占 4 字节
-_SEQUENCE_MODULO = 2**32
 
 
 def _transport_spec(scenario: Scenario) -> TransportSpec:
@@ -41,6 +40,7 @@ def build_dataset(
     """
     spec = _transport_spec(scenario)
     builder = DatasetBuilder(name or scenario.name, root, transport=spec.to_dict())
+    sessions: dict[str, TcpSession] = {}
     total = len(scenario.operations)
 
     for index, op in enumerate(scenario.operations):
@@ -65,19 +65,27 @@ def build_dataset(
         )
         builder.add(artifact)
         # 请求与响应连续进入同一会话：响应由服务端发回，链路方向相反
-        seq = (index * 10) % _SEQUENCE_MODULO
-        packets = [encapsulate(frame.payload, spec, seq=seq, ack=seq)]
-        if response_frame is not None:
-            packets.append(
-                encapsulate(
-                    response_frame.payload,
-                    spec.reversed(),
-                    seq=(seq + len(frame.payload)) % _SEQUENCE_MODULO,
-                    ack=(seq + len(frame.payload)) % _SEQUENCE_MODULO,
-                )
-            )
+        if spec.kind == "tcp":
+            key = session_key(artifact)
+            session = sessions.get(key)
+            if session is None:
+                session = TcpSession(spec)
+                sessions[key] = session
+                if spec.session == "full":
+                    builder.begin_session(key, session.handshake())
+            packets = [session.data(frame.payload, outgoing=True)]
+            if response_frame is not None:
+                packets.append(session.data(response_frame.payload, outgoing=False))
+        else:
+            packets = [encapsulate(frame.payload, spec)]
+            if response_frame is not None:
+                packets.append(encapsulate(response_frame.payload, spec.reversed()))
         builder.add_linked_packets(artifact.id, packets)
         if on_progress is not None:
             on_progress(index + 1, total)
+
+    for key, session in sessions.items():
+        if spec.session == "full":
+            builder.end_session(key, session.teardown())
 
     return builder.write()
