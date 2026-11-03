@@ -8,6 +8,9 @@ from typing import Any, Mapping
 #: 未指定源端口时的起始端口，后续按会话递增
 DEFAULT_SOURCE_PORT = 40001
 
+#: 会话形态：full = 握手 + 数据 + 挥手；data = 只发数据段
+SESSION_MODES = ("full", "data")
+
 
 @dataclass(frozen=True)
 class TransportSpec:
@@ -21,6 +24,14 @@ class TransportSpec:
     mac_src: str = "02:00:00:00:00:01"
     mac_dst: str = "02:00:00:00:00:02"
     vlan_id: int | None = None
+    session: str = "full"
+
+    def __post_init__(self) -> None:
+        """会话形态取值必须合法 —— 取值集合只在传输层声明一处。"""
+        if self.session not in SESSION_MODES:
+            raise ValueError(
+                f"未知的会话形态 {self.session!r}，可用：{list(SESSION_MODES)}"
+            )
 
     def reversed(self) -> "TransportSpec":
         """返回方向相反的传输配置。
