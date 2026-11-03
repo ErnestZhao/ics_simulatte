@@ -8,3 +8,6 @@ venv/
 
 # 生成的数据集产物（体量大，由 manifest 中的 sha256 做完整性校验）
 datasets/
+
+# 归档仓库的本地克隆（独立 git 仓库，不属于本项目源码）
+ics_simulatte/
