@@ -299,6 +299,28 @@ def test_concurrent_start_generates_config_only_once(tmp_path, monkeypatch):
     assert len(started) == 1
 
 
+def test_success_event_is_appended_after_phase_is_done(tmp_path, monkeypatch):
+    """账本追加 succeeded 事件的那一刻，内存里的 phase 必须是 done。
+
+    否则页面会显示「状态成功、进度 85%」—— 写盘其实早就完成了。
+    """
+    store = WebStore(tmp_path)
+    service = GenerationService(store)
+    config = save_config(store, _payload(count=1))
+    observed: list[str] = []
+    original_append = WebStore.append_event
+
+    def spy(self, event):
+        if event.get("type") == "generation_succeeded":
+            observed.append(service.state(event["generation_id"])["phase"])
+        return original_append(self, event)
+
+    monkeypatch.setattr(WebStore, "append_event", spy)
+    started = service.start(config["id"])
+    _wait(started["generation_id"], service)
+    assert observed == ["done"]
+
+
 def test_failed_generation_reports_zero_percent(tmp_path):
     """失败的生成进度是 0 —— 不能按已完成的交互数报个半截进度。"""
     assert _percent(3, 10, "failed") == 0.0

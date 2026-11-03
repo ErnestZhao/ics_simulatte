@@ -243,6 +243,11 @@ class GenerationService:
             packet_count = sum(
                 entry.get("pcap_frame_count", 0) for entry in manifest["artifacts"]
             )
+            # 先落内存态，再追加事件：账本一旦出现 generation_succeeded，
+            # 内存里的 phase 必须已经是 done —— 否则轮询会看到
+            # 「状态成功、进度 85%」这种自相矛盾的组合
+            # （写盘其实早就完成了，85% 才是谎报）。
+            job["phase"] = "done"
             self.store.append_event(
                 {
                     "type": "generation_succeeded",
@@ -253,7 +258,6 @@ class GenerationService:
                     "finished_at": _now(),
                 }
             )
-            job["phase"] = "done"
         except Exception as exc:  # 生成失败要落成事件，不能让线程静默死掉
             job["error"] = str(exc)
             job["phase"] = "failed"
