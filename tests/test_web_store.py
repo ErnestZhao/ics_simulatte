@@ -1,6 +1,7 @@
 """Web 层的 append-only 账本。"""
 
 import fcntl
+import json
 import logging
 import os
 import subprocess
@@ -238,3 +239,23 @@ def test_store_get_config_takes_latest_same_id(tmp_path):
     store.save_config({"id": "cfg_1", "name": "第二版"})
     assert store.get_config("cfg_1")["name"] == "第二版"
     assert len(store.list_configs()) == 2
+
+
+def test_ledger_keeps_records_with_unicode_line_separators(tmp_path):
+    """按字节切行：U+2028 之类的字符不算行分隔符，记录不能被劈成两半丢掉。
+
+    str.splitlines() 会在 U+2028/U+2029/U+0085 处断行 —— 配置名由用户输入，
+    含这类字符的记录会被整条静默丢弃。
+    """
+    name = "第一行\u2028第二行"
+    path = tmp_path / "records.jsonl"
+    path.write_text(
+        json.dumps({"id": "a", "name": name}, ensure_ascii=False)
+        + "\n"
+        + json.dumps({"id": "b"}, ensure_ascii=False)
+        + "\n",
+        encoding="utf-8",
+    )
+    records = Ledger(path).read_all()
+    assert [record["id"] for record in records] == ["a", "b"]
+    assert records[0]["name"] == name
