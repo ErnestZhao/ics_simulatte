@@ -16,7 +16,9 @@ CLIENT_ISN = 0x1000
 #: 服务端初始序号
 SERVER_ISN = 0x2000
 
-#: TCP 序列号占 4 字节，越界要回绕而不是崩掉
+#: TCP 序列号占 4 字节，按 2**32 取模 —— 超界要回绕而不是崩掉。
+#: Scapy 用 struct.pack("!I") 打包 seq/ack，越界直接报错，所以握手、挥手
+#: 与数据段一样都要取模，「seq 差 == 消耗的序号数」的不变式在回绕点才成立。
 _SEQUENCE_MODULO = 2**32
 
 
@@ -38,6 +40,7 @@ class TcpSession:
         self._client_seq = client_isn
         self._server_seq = server_isn
         self._server_spoke = False
+        self._handshaked = False
 
     @property
     def client_seq(self) -> int:
@@ -51,12 +54,14 @@ class TcpSession:
 
     def handshake(self) -> list[bytes]:
         """三次握手：SYN、SYN-ACK、ACK。"""
+        if self._handshaked:
+            raise RuntimeError("会话已握手，不能重复握手")
         packets: list[bytes] = []
         # SYN 占用客户端一个序号；服务端此时还没发过东西，ack 为 0
         packets.append(
             encapsulate(b"", self.spec, seq=self._client_seq, ack=self._ack_to_server(), flags="S")
         )
-        self._client_seq += 1
+        self._client_seq = (self._client_seq + 1) % _SEQUENCE_MODULO
         # SYN-ACK 同样占用服务端一个序号
         packets.append(
             encapsulate(
@@ -67,12 +72,13 @@ class TcpSession:
                 flags="SA",
             )
         )
-        self._server_seq += 1
+        self._server_seq = (self._server_seq + 1) % _SEQUENCE_MODULO
         self._server_spoke = True
         # ACK 确认服务端的序号
         packets.append(
             encapsulate(b"", self.spec, seq=self._client_seq, ack=self._server_seq, flags="A")
         )
+        self._handshaked = True
         return packets
 
     def data(self, payload: bytes, *, outgoing: bool) -> bytes:
@@ -97,7 +103,7 @@ class TcpSession:
         packets.append(
             encapsulate(b"", self.spec, seq=self._client_seq, ack=self._server_seq, flags="FA")
         )
-        self._client_seq += 1
+        self._client_seq = (self._client_seq + 1) % _SEQUENCE_MODULO
         packets.append(
             encapsulate(b"", self.spec.reversed(), seq=self._server_seq, ack=self._client_seq, flags="A")
         )
@@ -105,12 +111,18 @@ class TcpSession:
         packets.append(
             encapsulate(b"", self.spec.reversed(), seq=self._server_seq, ack=self._client_seq, flags="FA")
         )
-        self._server_seq += 1
+        self._server_seq = (self._server_seq + 1) % _SEQUENCE_MODULO
         packets.append(
             encapsulate(b"", self.spec, seq=self._client_seq, ack=self._server_seq, flags="A")
         )
         return packets
 
     def _ack_to_server(self) -> int:
-        """客户端数据段的 ack：服务端还没发过东西时是 0。"""
+        """客户端数据段的 ack：服务端还没发过东西时是 0。
+
+        只有客户端方向需要这个标志：服务端在客户端发出第一个数据段之前没发过
+        任何东西，此时客户端的 ack 必须是 0（TCP 规定：未收到任何段的确认号
+        为 0）；一旦服务端发过 SYN-ACK，客户端的 ack 就是服务端当前序号。
+        服务端方向不需要对称标志 —— 服务端的 ack 恒为客户端当前序号。
+        """
         return self._server_seq if self._server_spoke else 0

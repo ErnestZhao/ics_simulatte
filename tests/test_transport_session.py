@@ -1,6 +1,6 @@
 """TCP 会话序号状态机：握手、数据、挥手。"""
 
-from scapy.all import Ether, TCP
+from scapy.all import Ether, IP, TCP
 
 from icsgen.transport.session import CLIENT_ISN, SERVER_ISN, TcpSession
 from icsgen.transport.spec import TransportSpec
@@ -75,23 +75,54 @@ def test_teardown_sequence_numbers():
 
 
 def test_sequence_numbers_are_coherent_across_a_whole_session():
-    """任一方向相邻两包的 seq 差 == 前包载荷长度（数据段）或 1（SYN/FIN）。"""
-    session = TcpSession(TransportSpec())
+    """任一方向相邻两包的 seq 差 == 前包消耗的序号数。"""
+    spec = TransportSpec()
+    session = TcpSession(spec)
     packets = session.handshake()
     packets.append(session.data(b"\x01\x02\x03", outgoing=True))
     packets.append(session.data(b"\x04\x05", outgoing=False))
     packets.extend(session.teardown())
 
-    client_seqs: list[int] = []
-    server_seqs: list[int] = []
+    by_direction: dict[str, list[tuple[int, int, str]]] = {"client": [], "server": []}
     for raw in packets:
-        tcp = _tcp(raw)
-        if tcp.sport < tcp.dport:  # 客户端发出
-            client_seqs.append(tcp.seq)
-        else:
-            server_seqs.append(tcp.seq)
-    assert client_seqs == sorted(client_seqs)
-    assert server_seqs == sorted(server_seqs)
+        parsed = Ether(raw)
+        tcp = parsed[TCP]
+        direction = "client" if parsed[IP].src == spec.src_ip else "server"
+        by_direction[direction].append(
+            (tcp.seq, len(bytes(tcp.payload)), str(tcp.flags))
+        )
+
+    for direction, entries in by_direction.items():
+        for (seq, length, flags), (next_seq, _, _) in zip(entries, entries[1:]):
+            if length:
+                step = length
+            elif "S" in flags or "F" in flags:
+                step = 1
+            else:
+                step = 0
+            assert next_seq == (seq + step) % 2**32, direction
+
+
+def test_sequence_number_wraps_instead_of_crashing():
+    """序号到顶后回绕，不因 Scapy 打包越界而崩溃。"""
+    session = TcpSession(
+        TransportSpec(), client_isn=2**32 - 1, server_isn=2**32 - 1
+    )
+    packets = session.handshake()
+    assert len(packets) == 3
+    assert session.client_seq < 2**32
+    assert session.server_seq < 2**32
+
+
+def test_handshake_cannot_be_repeated():
+    session = TcpSession(TransportSpec())
+    session.handshake()
+    try:
+        session.handshake()
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("重复握手应当报错")
 
 
 def test_transport_spec_rejects_unknown_session_mode():
