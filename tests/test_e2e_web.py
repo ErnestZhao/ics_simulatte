@@ -53,7 +53,7 @@ def test_web_output_matches_cli_output_byte_for_byte(tmp_path):
     generation_id = client.post("/api/generations", json={"config_id": config_id}).json()[
         "generation_id"
     ]
-    detail = _wait(client, generation_id)
+    _wait(client, generation_id)
 
     scenario = Scenario(
         name="一致性",
@@ -80,14 +80,28 @@ def test_web_output_matches_cli_output_byte_for_byte(tmp_path):
     ]
     assert len(web_manifest["artifacts"]) == 3
 
-    for entry in web_manifest["artifacts"]:
-        rel = (
-            Path(entry["tier"])
-            / f"{entry['protocol']}_{entry['transport']}"
+    for web_entry, cli_entry in zip(web_manifest["artifacts"], cli_manifest["artifacts"]):
+        # tier 与 variant 必须先一致 —— 不一致时下面的文件比对会变成 FileNotFoundError，
+        # 看不出真正的原因（variant 映射错了会连带改 tier）。
+        assert (web_entry["tier"], web_entry["variant"]) == (
+            cli_entry["tier"],
+            cli_entry["variant"],
+        ), web_entry["id"]
+        # 响应帧也要一致 —— 变体的差异只在响应里（normal 与 exception 的请求帧是
+        # 同一串字节），不比对响应就检不出「variant 映射错了」。
+        assert web_entry.get("resp_sha256") == cli_entry.get("resp_sha256"), web_entry["id"]
+        frames = (
+            Path(web_entry["tier"])
+            / f"{web_entry['protocol']}_{web_entry['transport']}"
             / "frames"
-            / f"{entry['id']}.bin"
         )
-        assert (web_root / rel).read_bytes() == (cli_root / rel).read_bytes(), entry["id"]
+        names = [f"{web_entry['id']}.bin"]
+        if web_entry.get("resp_sha256") is not None:
+            names.append(f"{web_entry['id']}.resp.bin")
+        for name in names:
+            assert (web_root / frames / name).read_bytes() == (
+                cli_root / frames / name
+            ).read_bytes(), name
 
 
 def test_config_and_generation_records_are_immutable(tmp_path):
