@@ -132,7 +132,11 @@ def mutate_cmd(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
     transport = manifest.get("transport")
-    spec = TransportSpec.from_dict(transport) if transport else None
+    try:
+        spec = TransportSpec.from_dict(transport) if transport else None
+    except (TypeError, ValueError) as exc:
+        typer.echo(f"源数据集的传输参数不合法: {exc}", err=True)
+        raise typer.Exit(code=1)
     if spec is None:
         typer.echo("源数据集未记录传输层参数，mutated 层不生成 session.pcap", err=True)
     builder = DatasetBuilder(

@@ -262,16 +262,27 @@ def test_transaction_id_wraps_after_65536(tmp_path, monkeypatch):
 
 
 def test_tcp_session_starts_with_handshake_and_ends_with_teardown(tmp_path):
-    """TCP 会话文件是一次完整的连接：握手 → 数据 → 挥手。"""
+    """TCP 会话文件是一次完整的连接：握手 → 数据 → 挥手。
+
+    场景里另有一条异常层操作：它是另一个会话文件（另一个 tier），
+    包数统计只算本会话，别把两个会话混在一起数。
+    """
     from scapy.all import IP, TCP, rdpcap
 
-    from icsgen.spec.model import Operation
+    from icsgen.spec.model import Operation, Variant
 
     adapter = load_modbus_adapter()
     scenario = Scenario(
         name="demo",
         transport={"kind": "tcp"},
-        operations=(Operation(op="modbus.read_holding_registers", params={"quantity": 3}),),
+        operations=(
+            Operation(op="modbus.read_holding_registers", params={"quantity": 3}),
+            Operation(
+                op="modbus.read_holding_registers",
+                params={"quantity": 3},
+                variant=Variant.EXCEPTION,
+            ),
+        ),
     )
     root = build_dataset(scenario, adapter, tmp_path / "ds", name="demo")
     packets = rdpcap(str(root / "legit" / "modbus_tcp" / "session.pcap"))
@@ -280,10 +291,19 @@ def test_tcp_session_starts_with_handshake_and_ends_with_teardown(tmp_path):
     assert flags[-4:] == ["FA", "A", "FA", "A"]
     assert all(flag == "PA" for flag in flags[3:-4])
     # 规格 §7 指标 1：包数 == 3 + 数据帧数 + 4。pcap_frame_count 只数
-    # 产物自己的帧，所以这里不用再减握手与挥手。
+    # 产物自己的帧，所以这里不用再减握手与挥手。数据帧数只统计本会话
+    # （legit/modbus_tcp）里的产物 —— 别的 tier 是另一个会话文件。
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-    data_frames = sum(entry["pcap_frame_count"] for entry in manifest["artifacts"])
+    data_frames = sum(
+        entry["pcap_frame_count"]
+        for entry in manifest["artifacts"]
+        if (entry["tier"], entry["protocol"], entry["transport"])
+        == ("legit", "modbus", "tcp")
+    )
     assert len(packets) == 3 + data_frames + 4
+    # 规格 §6：manifest 的 sessions 块记的是该会话 pcap 的真实包数（含握手
+    # 与挥手）—— Web 层的「包数」直接信它，所以它得与 pcap 对得上。
+    assert manifest["sessions"]["legit/modbus_tcp"] == len(packets)
 
 
 def test_data_session_mode_emits_only_data_segments(tmp_path):

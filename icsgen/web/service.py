@@ -283,7 +283,8 @@ class GenerationService:
             )
             sessions = manifest.get("sessions")
             if sessions is None:
-                # 旧数据集的 manifest 没有会话块：退回按产物帧数求和
+                # 没有会话块的 manifest 来自握手特性之前 —— 那时 pcap 里只有
+                # 产物自己的帧，按帧数求和就是真实包数。
                 packet_count = sum(
                     entry.get("pcap_frame_count", 0) for entry in manifest["artifacts"]
                 )
