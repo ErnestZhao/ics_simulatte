@@ -1,3 +1,50 @@
-<!DOCTYPE html>
-<html lang="zh-CN"><head><meta charset="utf-8"><title>生成详情</title></head>
-<body><h1>生成详情</h1><p>模板待实现</p></body></html>
+{% extends "base.html" %}
+{% block title %}生成 {{ generation.id }} — icsgen{% endblock %}
+{% block content %}
+<h1>生成 {{ generation.id }}</h1>
+<p class="note">配置：{{ generation.config_name }}（{{ generation.config_id }}）</p>
+
+<div id="generation" data-generation-id="{{ generation.id }}" data-status="{{ generation.status }}">
+{% if generation.status == "running" %}
+  <div class="progress"><div id="bar" class="bar" style="width: {{ generation.percent }}%"></div></div>
+  <p id="progress-label">{{ generation.done }} / {{ generation.total }}（{{ generation.percent }}%）</p>
+{% else %}
+  <p>状态：{{ generation.status }}{% if generation.error %} — <span class="error">{{ generation.error }}</span>{% endif %}</p>
+{% endif %}
+</div>
+
+{% if generation.status == "succeeded" %}
+<section class="panel">
+  <h2>产物（{{ generation.artifacts | length }} 条）</h2>
+  <p>
+    <a href="/api/generations/{{ generation.id }}/archive.zip">下载整个数据集（zip）</a>
+  </p>
+  <table>
+    <thead>
+      <tr><th>操作</th><th>变体</th><th>层</th><th>长度</th><th>pcap 位置</th><th>下载</th></tr>
+    </thead>
+    <tbody>
+    {% for item in generation.artifacts %}
+      <tr data-artifact="{{ item.id }}">
+        <td>{{ item.op }}</td>
+        <td>{{ item.variant }}</td>
+        <td>{{ item.tier }}</td>
+        <td>{{ item.len }}</td>
+        <td>{{ item.pcap_file }} #{{ item.pcap_index }}</td>
+        <td>
+          <a href="/api/generations/{{ generation.id }}/download/{{ item.tier }}/{{ item.protocol }}_{{ item.transport }}/frames/{{ item.id | urlencode }}.bin">.bin</a>
+          <a href="/api/generations/{{ generation.id }}/download/{{ item.tier }}/{{ item.protocol }}_{{ item.transport }}/frames/{{ item.id | urlencode }}.hex">.hex</a>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="panel">
+  <h2>帧预览</h2>
+  <p class="note">点击上面任意一行查看该次交互的请求与响应帧。</p>
+  <div id="detail"></div>
+</section>
+{% endif %}
+{% endblock %}

@@ -1,3 +1,48 @@
-<!DOCTYPE html>
-<html lang="zh-CN"><head><meta charset="utf-8"><title>工作台</title></head>
-<body><h1>工作台</h1><p>模板待实现</p></body></html>
+{% extends "base.html" %}
+{% block title %}工作台 — icsgen{% endblock %}
+{% block bodyattrs %} id="workbench"{% endblock %}
+{% block content %}
+<h1>工作台</h1>
+
+<section class="panel">
+  <h2>协议与传输</h2>
+  <label class="field">
+    <span>协议</span>
+    <select id="protocol">
+      {% for protocol in protocols %}
+      <option value="{{ protocol.name }}" data-transports="{{ protocol.transports | join(',') }}">
+        {{ protocol.name }} — {{ protocol.summary }}（{{ protocol.operation_count }} 个操作类型 / {{ protocol.coverage_count }} 条覆盖条目）
+      </option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="field">
+    <span>传输</span>
+    <select id="transport"></select>
+  </label>
+</section>
+
+<section class="panel">
+  <h2>操作类型</h2>
+  <input id="op-filter" type="search" placeholder="按名称或说明过滤">
+  <div id="op-list" class="op-list"></div>
+</section>
+
+<section class="panel">
+  <h2>已选操作</h2>
+  <div id="selected"></div>
+</section>
+
+<section class="panel">
+  <h2>保存与生成</h2>
+  <label class="field">
+    <span>配置名称</span>
+    <input id="config-name" type="text" placeholder="例如：读保持寄存器压测">
+  </label>
+  <div class="actions">
+    <button type="button" id="save">保存配置</button>
+    <button type="button" id="generate" class="primary">保存并生成数据包</button>
+  </div>
+  <p id="message" class="message"></p>
+</section>
+{% endblock %}

@@ -1,3 +1,58 @@
-<!DOCTYPE html>
-<html lang="zh-CN"><head><meta charset="utf-8"><title>记录</title></head>
-<body><h1>记录</h1><p>模板待实现</p></body></html>
+{% extends "base.html" %}
+{% block title %}记录 — icsgen{% endblock %}
+{% block content %}
+<h1>记录</h1>
+<p class="note">配置记录与生成记录都是只读的：保存后不可修改，也不可删除。</p>
+
+<h2>配置记录</h2>
+<table>
+  <thead>
+    <tr><th>名称</th><th>协议</th><th>操作数</th><th>交互总数</th><th>保存时间</th><th>生成</th></tr>
+  </thead>
+  <tbody>
+  {% for config in configs %}
+    <tr>
+      <td>{{ config.name }}</td>
+      <td>{{ config.protocol }}</td>
+      <td>{{ config.operations | length }}</td>
+      <td>{{ config.operations | sum(attribute='count') }}</td>
+      <td>{{ config.created_at }}</td>
+      <td>
+        {% if config.generation_id %}
+        <a href="/generations/{{ config.generation_id }}">{{ config.generation_id }}</a>
+        {% else %}
+        未生成
+        {% endif %}
+      </td>
+    </tr>
+  {% else %}
+    <tr><td colspan="6">还没有保存过配置。</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<h2>生成记录</h2>
+<table>
+  <thead>
+    <tr><th>生成</th><th>配置</th><th>状态</th><th>产物数</th><th>包数</th><th>耗时</th><th>开始时间</th></tr>
+  </thead>
+  <tbody>
+  {% for generation in generations %}
+    <tr>
+      <td><a href="/generations/{{ generation.id }}">{{ generation.id }}</a></td>
+      <td>{{ generation.config_name }}</td>
+      <td>
+        {{ generation.status }}
+        {% if generation.error %}<span class="error">— {{ generation.error }}</span>{% endif %}
+      </td>
+      <td>{{ generation.artifact_count if generation.artifact_count is not none else "-" }}</td>
+      <td>{{ generation.packet_count if generation.packet_count is not none else "-" }}</td>
+      <td>{{ generation.duration_ms if generation.duration_ms is not none else "-" }}</td>
+      <td>{{ generation.created_at }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="7">还没有生成记录。</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

@@ -16,7 +16,12 @@ from typing import Any
 
 from ..generator import build_dataset
 from ..protocols.base import BuildContext
-from ..protocols.registry import available_protocols, get_adapter, get_catalog
+from ..protocols.registry import (
+    available_protocols,
+    get_adapter,
+    get_catalog,
+    transport_kind,
+)
 from ..spec.loader import ScenarioOperationModel, validate_operations
 from ..spec.model import Operation, Scenario, Variant
 from .models import ConfigPayload, OperationInput
@@ -53,7 +58,9 @@ def list_protocols() -> list[dict[str, Any]]:
             {
                 "name": info.name,
                 "summary": info.summary,
-                "transports": list(info.transports),
+                # 给的是传输种类（tcp/serial），不是 catalog 里的传输名（tcp/rtu）——
+                # 页面要回传的就是它，映射只应有一份，在注册表里。
+                "transports": [transport_kind(name) for name in info.transports],
                 "operation_count": catalog.count(),
                 "coverage_count": catalog.coverage_count(),
             }

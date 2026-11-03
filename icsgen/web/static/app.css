@@ -1,1 +1,101 @@
-/* 样式待实现 */
+/* icsgen Web 界面样式。 */
+
+:root {
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --ink: #1d2129;
+  --muted: #6b7280;
+  --line: #e3e6ea;
+  --accent: #2f6feb;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.6 -apple-system, "Segoe UI", "Noto Sans CJK SC", sans-serif;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 12px 24px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+.brand { font-weight: 700; letter-spacing: 0.5px; }
+.topbar a { color: var(--muted); text-decoration: none; margin-right: 16px; }
+.topbar a:hover { color: var(--accent); }
+
+main { max-width: 1080px; margin: 24px auto; padding: 0 24px; }
+
+h1 { font-size: 22px; margin: 0 0 16px; }
+h2 { font-size: 16px; margin: 0 0 12px; }
+h3 { font-size: 14px; margin: 0 0 8px; }
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 16px 20px;
+  margin-bottom: 16px;
+}
+
+.note { color: var(--muted); }
+
+.field { display: inline-flex; align-items: center; gap: 8px; margin: 0 16px 8px 0; }
+.field > span { color: var(--muted); min-width: 64px; }
+
+input, select {
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font: inherit;
+  background: #fff;
+}
+
+button {
+  padding: 6px 14px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fff;
+  font: inherit;
+  cursor: pointer;
+}
+
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.actions { margin-top: 12px; }
+
+.op-list { max-height: 320px; overflow: auto; border: 1px solid var(--line); border-radius: 4px; }
+.op-row { display: block; padding: 5px 10px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.op-row:last-child { border-bottom: none; }
+.op-row:hover { background: #f0f5ff; }
+
+.selected-op { border-top: 1px solid var(--line); padding-top: 12px; margin-top: 12px; }
+.selected-op:first-child { border-top: none; padding-top: 0; margin-top: 0; }
+
+table { width: 100%; border-collapse: collapse; background: var(--panel); }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; }
+tr[data-artifact] { cursor: pointer; }
+tr[data-artifact]:hover { background: #f0f5ff; }
+
+.progress { height: 10px; background: var(--line); border-radius: 5px; overflow: hidden; }
+.bar { height: 100%; background: var(--accent); transition: width 0.2s; }
+
+.hex {
+  background: #10151c;
+  color: #d7e0ea;
+  padding: 10px 12px;
+  border-radius: 4px;
+  overflow: auto;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.message { color: var(--muted); min-height: 20px; }
+.error { color: #c0392b; }
