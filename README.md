@@ -5,8 +5,11 @@
 ## 安装
 
 ```bash
-python -m pip install -e ".[dev]"
+python -m pip install -e ".[dev,web]"
 ```
+
+`web` 组是 Web 界面的运行时依赖（fastapi / uvicorn / jinja2），`dev` 组是测试依赖
+（pytest / httpx）。只跑命令行、不开 Web 界面时装 `".[dev]"` 即可。
 
 ## 快速开始
 
@@ -79,6 +82,25 @@ icsgen serve --protocol modbus --transport tcp --port 5020 --role plc
 # 主动请求，产出成对的请求/响应会话
 icsgen serve --protocol modbus --transport tcp --port 5020 --role client
 ```
+
+## Web 交互界面
+
+```bash
+python -m pip install -e ".[web]"
+icsgen web --host 127.0.0.1 --port 8080
+```
+
+浏览器打开 `http://127.0.0.1:8080`，走「选协议 → 选操作 → 填参数与交互数量 → 保存配置 → 生成 → 进度 → 预览 → 下载」全链路：
+
+- **选协议与操作**：协议来自注册表，操作类型来自该协议的 catalog（Modbus 当前 41 个操作类型 / 192 条覆盖条目），参数表单按 catalog 的参数 schema 在浏览器端动态生成。
+- **交互数量**：每条操作可单独设置重复次数，生成的产物条数 == Σ 数量。
+- **配置记录**：保存后**不可修改、不可删除**；每条配置**只能生成一次**，二次生成返回 409。
+- **进度**：分「构建帧」与「写盘」两个阶段，完成后可预览每条产物的 hex 与协议字段解析结果。
+- **下载**：可下载单个 `.bin` 帧文件，也可打包下载整个数据集 `archive.zip`。
+
+Web 层是库之上的薄壳：生成走 `icsgen.generator.build_dataset`，校验走 `icsgen.spec.loader.validate_operations`，网页产出的字节与 CLI 逐字节一致。记录页 `/records` 列出全部配置与生成记录。
+
+账本与生成目录默认落在 `datasets/web`，用 `--output` 可以换位置。
 
 ## 扩展新的操作类型
 

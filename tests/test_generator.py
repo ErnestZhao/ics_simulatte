@@ -223,6 +223,11 @@ def test_transaction_id_wraps_after_65536(tmp_path, monkeypatch):
         def build_response(self, op, ctx):
             return inner.build_response(op, ctx)
 
+    # 这三处打桩依赖被测模块以「模块级 from ... import ...」绑定这些名字：
+    # icsgen/generator.py 的 encapsulate、icsgen/emit/dataset.py 的 write_raw/write_pcap。
+    # 若它们改成函数内局部 import，模块属性上的桩会被局部绑定遮蔽而**静默失效** ——
+    # 用例照样通过，只是跑回真实的封装与写盘，测试从秒级掉回分钟级。
+    # 这是该用例的隐式契约，改那两个模块的导入形式时必须同步改这里。
     monkeypatch.setattr(
         "icsgen.generator.encapsulate",
         lambda payload, spec, seq=0, ack=0: b"\x00",
