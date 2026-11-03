@@ -135,6 +135,16 @@ def test_ledger_survives_invalid_utf8_bytes(tmp_path):
     assert [record["id"] for record in Ledger(path).read_all()] == ["a", "c"]
 
 
+def test_ledger_skips_line_with_invalid_utf8_inside_value(tmp_path, caplog):
+    """坏字节落在字段值里时，整行作废并告警，不能带着替换字符混进记录。"""
+    path = tmp_path / "records.jsonl"
+    path.write_bytes(b'{"id": "a"}\n{"id": "b", "name": "va\xfflue"}\n{"id": "c"}\n')
+    with caplog.at_level(logging.WARNING, logger="icsgen.web.store"):
+        records = Ledger(path).read_all()
+    assert [record["id"] for record in records] == ["a", "c"]
+    assert any("UTF-8" in message for message in caplog.messages)
+
+
 def test_ledger_reads_leading_bom(tmp_path):
     """带 BOM 的文件不该丢掉首行记录。"""
     path = tmp_path / "records.jsonl"
@@ -143,7 +153,12 @@ def test_ledger_reads_leading_bom(tmp_path):
 
 
 def test_ledger_cross_process_appends_do_not_interleave(tmp_path):
-    """多个进程同时追加同一账本，行不能交错 —— 靠的是 flock，不是进程内锁。"""
+    """多个进程同时追加同一账本，行不能交错（spec §14）。
+
+    守的是「并发追加不交错」这条契约，不是 flock 本身 ——
+    O_APPEND + 单次 write() 在本地文件系统上本来就原子，flock 是额外保险，
+    由另一条用例单独钉住。
+    """
     path = tmp_path / "records.jsonl"
     workers, per_worker = 4, 25
     code = (

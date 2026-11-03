@@ -40,12 +40,24 @@ class Ledger:
         return record
 
     def read_all(self) -> list[dict[str, Any]]:
-        """读出全部记录；空行、非法字节与解析失败的行被跳过并告警。"""
-        if not self.path.exists():
+        """读出全部记录；空行、非法字节与解析失败的行被跳过并告警。
+
+        逐行解码：某一行里有非法字节就整行作废，绝不让替换字符混进
+        记录 —— 那会让调用方拿到一条内容被悄悄改过的数据。
+        """
+        try:
+            raw_lines = self.path.read_bytes().splitlines()
+        except FileNotFoundError:
             return []
         records: list[dict[str, Any]] = []
-        text = self.path.read_bytes().decode("utf-8-sig", errors="replace")
-        for number, line in enumerate(text.splitlines(), start=1):
+        for number, raw in enumerate(raw_lines, start=1):
+            try:
+                line = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                logger.warning("跳过账本 %s 第 %d 行：不是合法 UTF-8", self.path, number)
+                continue
+            if number == 1:
+                line = line.removeprefix("\ufeff")
             line = line.strip()
             if not line:
                 continue
