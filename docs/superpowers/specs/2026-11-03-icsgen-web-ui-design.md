@@ -245,10 +245,11 @@ class FrameView:
 
 class ProtocolAdapter(Protocol):
     …
-    def inspect(self, payload: bytes, ctx: BuildContext, direction: str) -> FrameView: ...
+    def inspect(self, op: str, payload: bytes, ctx: BuildContext, direction: str) -> FrameView: ...
 ```
 
 - `direction` ∈ `{"request", "response"}`，决定用布局的哪一侧解字段
+- `op` 是操作名，用于定位字段布局 —— **不能按功能码反查布局**：catalog 中多个操作共享功能码（21 个诊断子功能共享 fc08，FC2B 有两个条目），按功能码反查会取到错误的布局
 - `ModbusAdapter.inspect` 实现（置于 `icsgen/protocols/modbus/inspect.py`）：
   - TCP：`parse_mbap()` 拆出事务 id / 协议 id / 长度 / 单元 id，余下是 PDU
   - RTU：`parse_rtu()` 拆出单元 id 与 PDU（并校验 CRC）
@@ -292,6 +293,8 @@ def build_dataset(scenario, adapter, root, name=None,
 | `done` | 100 |
 
 写盘完成才置 100 —— 不谎报进度。
+
+阶段切换点是**最后一条交互构建完成时**（回调收到 `done == total`）：此刻帧已全部构建、即将写盘，之后 percent 停在 85 直到写盘结束。
 
 ### 10.3 异步执行
 
@@ -431,10 +434,11 @@ def build_dataset(scenario, adapter, root, name=None,
 
 ```toml
 [project.optional-dependencies]
-web = ["fastapi>=0.115", "uvicorn>=0.34", "jinja2>=3.1", "python-multipart>=0.0.20"]
+web = ["fastapi>=0.115", "uvicorn>=0.34", "jinja2>=3.1"]
 ```
 
 - 新增 CLI 命令 `icsgen web --host 127.0.0.1 --port 8080 --output datasets/web`，内部起 uvicorn
+- 页面与后端之间一律走 JSON API（`fetch`），不使用 HTML 表单提交 —— 操作类型的参数表单由 catalog 的参数 schema 在浏览器端动态生成，走 JSON 才不需要服务端再实现一套表单解析
 - uvicorn 亦可直接指向 `icsgen.web.app:create_app --factory`
 - 全项目仍是纯 Python 依赖，无前端构建链
 
