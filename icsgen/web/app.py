@@ -146,8 +146,13 @@ def create_app(root: Path | None = None) -> FastAPI:
         archive = base.parent / f"{generation_id}.zip"
         with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
             for path in sorted(base.rglob("*")):
-                if path.is_file():
-                    bundle.write(path, Path(generation_id) / path.relative_to(base))
+                # 符号链接不打包：zipfile.write 会跟随它，把生成目录之外的文件
+                # 内容读进归档 —— 而同目录的下载路由（app.py:137 的
+                # is_relative_to 校验）会拒绝这种文件。两条同类路由的防护
+                # 强度必须一致。
+                if path.is_symlink() or not path.is_file():
+                    continue
+                bundle.write(path, Path(generation_id) / path.relative_to(base))
         return FileResponse(archive, filename=f"{generation_id}.zip")
 
     # ---- 页面 ----

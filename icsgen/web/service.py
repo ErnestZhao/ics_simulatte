@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 import uuid
 from copy import deepcopy
+from dataclasses import fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -24,8 +26,11 @@ from ..protocols.registry import (
 )
 from ..spec.loader import ScenarioOperationModel, validate_operations
 from ..spec.model import Operation, Scenario, Variant
+from ..transport.spec import TransportSpec
 from .models import ConfigPayload, OperationInput
-from .store import WebStore
+from .store import RootOwnerLock, WebStore
+
+logger = logging.getLogger(__name__)
 
 #: 单个操作的交互数量上限
 MAX_COUNT_PER_OPERATION = 1000
@@ -109,6 +114,13 @@ def save_config(store: WebStore, payload: ConfigPayload) -> dict[str, Any]:
     except KeyError as exc:
         # KeyError 的消息里已经带上了可用协议列表（spec §12：提示可用协议列表）
         raise NotFound(str(exc)) from exc
+    # 传输配置里出现未知字段时要在保存时就报错：配置记录一旦落进只追加的
+    # 账本就删不掉了，而「只能生成一次」的名额也会被占掉 —— 用户将无法重试。
+    # 字段集取自库层的 TransportSpec（唯一事实源），不另写一份白名单。
+    known_transport_fields = {item.name for item in fields(TransportSpec)}
+    unknown = sorted(set(payload.transport) - known_transport_fields)
+    if unknown:
+        raise WebError(f"传输配置里有未知字段：{'、'.join(unknown)}")
     items = []
     for index, item in enumerate(payload.operations):
         try:
@@ -118,8 +130,11 @@ def save_config(store: WebStore, payload: ConfigPayload) -> dict[str, Any]:
         items.append(
             ScenarioOperationModel(op=item.op, params=item.params, variant=variant)
         )
-    validate_operations(catalog, items, context="提交的操作")
+    # 数量是表单级的粗粒度检查，参数是协议级的细粒度检查：界面上协议与
+    # 操作类型是下拉选出来的（不可能填错），唯一可能填错的就是数量 ——
+    # 所以数量先查，也省掉一次对全部操作的 schema 校验。
     _check_counts(payload.operations)
+    validate_operations(catalog, items, context="提交的操作")
     record = {
         "id": f"cfg_{uuid.uuid4().hex[:12]}",
         "name": payload.name,
@@ -184,7 +199,17 @@ class GenerationService:
         self.store = store
         self._jobs: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
-        recover_orphan_generations(store)
+        # 启动孤儿恢复只由数据目录的所有者实例执行：另一个进程正在跑时，
+        # 把它的在跑任务判成孤儿，会往只追加的账本里写一条永远删不掉的
+        # 假失败（spec §10.3 的孤儿恢复只对「本进程重启」成立）。
+        self.owner_lock = RootOwnerLock(store.root)
+        if self.owner_lock.acquired:
+            recover_orphan_generations(store)
+        else:
+            logger.warning(
+                "数据目录 %s 已被另一个服务进程占用，本进程不执行启动孤儿恢复",
+                store.root,
+            )
 
     def start(self, config_id: str) -> dict[str, Any]:
         """发起一次生成。同一配置只能生成一次。"""

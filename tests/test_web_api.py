@@ -77,6 +77,61 @@ def test_api_save_config_rejects_bad_param(client):
     assert "参数校验失败" in response.json()["detail"]
 
 
+def test_api_save_config_rejects_unknown_transport_field(client):
+    """传输配置里的未知字段必须在保存时报出来（复审 F-2）。
+
+    配置记录一旦落进只追加的账本就删不掉，而且「只能生成一次」的名额会被
+    占掉 —— 用户没法重试这条配置。校验必须发生在写账本之前。
+    """
+    payload = {
+        "name": "未知传输字段",
+        "protocol": "modbus",
+        "transport": {"kind": "tcp", "bogus_key": 1},
+        "operations": [
+            {
+                "op": "modbus.read_holding_registers",
+                "variant": "normal",
+                "params": {"quantity": 3},
+                "count": 1,
+            }
+        ],
+    }
+    response = client.post("/api/configs", json=payload)
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert "bogus_key" in detail
+    # 报错要是中文提示，不是 JavaScript 风格的异常文本
+    assert "未知字段" in detail
+    # 账本里不能留下这条记录
+    assert client.get("/api/configs").json() == []
+
+
+def test_api_save_config_reports_count_limit_before_unknown_operation(client):
+    """数量检查要排在操作存在性检查之前（复审 F-4）。
+
+    数量是表单级的粗粒度检查（用户填错），操作名是下拉选出来的（不会错）。
+    两条错误同时命中时先报数量 —— spec §12 没规定，但粗粒度优先更友好。
+    """
+    payload = {
+        "name": "超限",
+        "protocol": "modbus",
+        "transport": {"kind": "tcp"},
+        "operations": [
+            {
+                "op": "modbus.does_not_exist",
+                "variant": "normal",
+                "params": {},
+                "count": 99999,
+            }
+        ],
+    }
+    response = client.post("/api/configs", json=payload)
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert "超过单操作上限" in detail
+    assert "不存在操作" not in detail
+
+
 def test_api_generation_lifecycle(client):
     payload = {
         "name": "生成配置",
@@ -230,9 +285,63 @@ def test_api_archive_downloads_zip(client):
         if detail["status"] != "running":
             break
         time.sleep(0.05)
+    assert detail["status"] == "succeeded", detail
     response = client.get(f"/api/generations/{generation_id}/archive.zip")
     assert response.status_code == 200
     assert response.content[:2] == b"PK"
+
+
+def test_archive_does_not_follow_symlinks(client, tmp_path):
+    """归档不能跟随符号链接把生成目录外的内容打进去（复审 F-1）。
+
+    同目录的下载路由做了 is_relative_to 校验会拒绝这类文件，两条同类路由
+    的防护强度必须一致。
+    """
+    import zipfile
+
+    payload = {
+        "name": "符号链接配置",
+        "protocol": "modbus",
+        "transport": {"kind": "tcp"},
+        "operations": [
+            {
+                "op": "modbus.read_holding_registers",
+                "variant": "normal",
+                "params": {"quantity": 3},
+                "count": 1,
+            }
+        ],
+    }
+    config_id = client.post("/api/configs", json=payload).json()["id"]
+    generation_id = client.post("/api/generations", json={"config_id": config_id}).json()[
+        "generation_id"
+    ]
+    import time
+
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        detail = client.get(f"/api/generations/{generation_id}").json()
+        if detail["status"] != "running":
+            break
+        time.sleep(0.05)
+    assert detail["status"] == "succeeded", detail
+
+    # 目录外的一份「机密」文件，以及指向它的符号链接
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"SECRET BYTES")
+    store = client.app.state.store
+    base = store.generation_dir(generation_id)
+    (base / "link.bin").symlink_to(outside)
+
+    response = client.get(f"/api/generations/{generation_id}/archive.zip")
+    assert response.status_code == 200
+    archive_path = base.parent / f"{generation_id}.zip"
+    with zipfile.ZipFile(archive_path) as bundle:
+        names = bundle.namelist()
+        assert f"{generation_id}/link.bin" not in names
+        # 目录外的内容一个字节都不能进归档
+        for name in names:
+            assert b"SECRET BYTES" not in bundle.read(name)
 
 
 def test_pages_render(client):

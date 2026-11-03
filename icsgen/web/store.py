@@ -180,3 +180,64 @@ class WebStore:
     def generation_dir(self, generation_id: str) -> Path:
         """一个生成任务的数据集目录。"""
         return self.root / "generations" / generation_id
+
+
+class RootOwnerLock:
+    """数据目录的所有者锁：同一目录同时只允许一个服务进程做启动孤儿恢复。
+
+    用 flock 拿锁 —— 进程退出时由内核释放，不会留下需要人工清理的僵尸锁。
+    拿不到锁说明**另一个进程正在用这个目录**，此时本进程不能执行孤儿恢复：
+    把别人正在跑的任务判成孤儿，会往只追加的账本里写一条永远删不掉的假失败。
+
+    锁文件放在数据目录根下（`.lock`），与账本同目录。
+    """
+
+    def __init__(self, root: Path) -> None:
+        self.acquired = False
+        self._handle = None
+        path = Path(root) / ".lock"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            handle = path.open("a+")
+        except OSError as exc:
+            # 拿不到锁文件（只读目录等）时不能断定「有人在用」，
+            # 只能放弃独占权、退回无锁行为。
+            logger.warning("打不开数据目录的锁文件 %s：%s", path, exc)
+            return
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            handle.close()
+            logger.warning("数据目录 %s 已被另一个服务进程占用", root)
+            return
+        self._handle = handle
+        self.acquired = True
+
+    def release(self) -> None:
+        """释放锁。进程退出时内核也会释放，这里是给测试与优雅退出用的。"""
+        if self._handle is None:
+            return
+        try:
+            fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        self._handle.close()
+        self._handle = None
+        self.acquired = False
+
+    def __del__(self) -> None:
+        """对象被回收时关掉句柄。
+
+        锁必须活到服务实例结束 —— 句柄提前关掉等于悄悄把锁释放了，
+        让另一个实例以为自己是目录所有者。回收时把 fd 关掉，同时
+        避免留下「未关闭的文件」的 ResourceWarning。
+        """
+        handle = getattr(self, "_handle", None)
+        if handle is None:
+            return
+        self._handle = None
+        self.acquired = False
+        try:
+            handle.close()
+        except Exception:  # 解释器退出期间关闭可能失败，忽略即可
+            pass

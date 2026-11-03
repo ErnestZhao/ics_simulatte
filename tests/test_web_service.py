@@ -102,6 +102,36 @@ def test_save_config_rejects_count_over_limit(tmp_path):
         save_config(store, _payload(count=MAX_COUNT_PER_OPERATION + 1))
 
 
+def test_save_config_rejects_unknown_transport_field(tmp_path):
+    """传输配置里的未知字段要在保存时就报错（复审 F-2）。
+
+    报错要发生在写账本之前：配置记录一旦落进只追加的账本就删不掉，
+    而且「只能生成一次」的名额会被占掉 —— 用户将无法重试这条配置。
+    """
+    store = WebStore(tmp_path)
+    payload = _payload()
+    payload.transport = {"kind": "tcp", "bogus_key": 1}
+    with pytest.raises(WebError) as info:
+        save_config(store, payload)
+    assert "bogus_key" in str(info.value)
+    assert "未知字段" in str(info.value)
+    # 账本里不能留下这条记录
+    assert store.list_configs() == []
+
+
+def test_save_config_checks_count_before_unknown_operation(tmp_path):
+    """数量检查要排在操作存在性检查之前（复审 F-4）。
+
+    数量是表单级的粗粒度检查（用户填错），操作名是下拉选出来的（不会错）。
+    """
+    store = WebStore(tmp_path)
+    with pytest.raises(WebError) as info:
+        save_config(store, _payload(count=99999, op="modbus.does_not_exist"))
+    message = str(info.value)
+    assert "超过单操作上限" in message
+    assert "不存在操作" not in message
+
+
 def test_save_config_rejects_total_over_limit(tmp_path):
     store = WebStore(tmp_path)
     payload = ConfigPayload(
@@ -200,6 +230,44 @@ def test_startup_recovers_orphan_generations(tmp_path):
         "output_dir": str(store.generation_dir("gen_1")),
     })
     GenerationService(store)  # 构造即触发启动恢复
+    generation = store.list_generations()[0]
+    assert generation["status"] == "failed"
+    assert "重启" in generation["error"]
+
+
+def test_second_instance_does_not_mark_live_generation_failed(tmp_path):
+    """另一个服务进程在跑时，本进程不能把它的在跑任务判成孤儿（spec §10.3）。
+
+    flock 的锁按 open file description 算 —— 同一进程里第二次 open 同一个
+    锁文件会拿到另一个 description，因此第二个实例同样拿不到锁。这个场景
+    在单进程内就能复现，不需要真的起子进程。
+    """
+    first = GenerationService(WebStore(tmp_path))   # 第一个实例：拿到锁
+    store = WebStore(tmp_path)
+    store.append_event({
+        "type": "generation_started", "generation_id": "gen_live",
+        "config_id": "cfg_1", "config_name": "配置", "created_at": "t0",
+        "output_dir": str(store.generation_dir("gen_live")),
+    })
+    second = GenerationService(store)                # 第二个实例：拿不到锁
+    assert first.owner_lock.acquired is True
+    assert second.owner_lock.acquired is False
+    generation = store.list_generations()[0]
+    assert generation["status"] == "running"
+    assert generation["error"] is None
+
+
+def test_orphan_recovery_runs_after_owner_releases_the_lock(tmp_path):
+    """所有者退出（释放锁）后，新实例要执行启动孤儿恢复（spec §10.3）。"""
+    store = WebStore(tmp_path)
+    owner = GenerationService(store)
+    store.append_event({
+        "type": "generation_started", "generation_id": "gen_1",
+        "config_id": "cfg_1", "config_name": "配置", "created_at": "t0",
+        "output_dir": str(store.generation_dir("gen_1")),
+    })
+    owner.owner_lock.release()          # 模拟原来的进程退出了
+    GenerationService(store)            # 新实例拿到锁 → 执行孤儿恢复
     generation = store.list_generations()[0]
     assert generation["status"] == "failed"
     assert "重启" in generation["error"]
