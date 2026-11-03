@@ -20,8 +20,9 @@ class OperationEntry(BaseModel):
     """catalog 中的一个操作类型条目。
 
     params 是「参数名 -> 该参数的 JSON Schema 片段」的映射；其中的 default
-    键仅作文档说明，参数缺省值由字段布局的 Field.default 决定，加载时不会
-    自动填充。
+    键是该参数的权威缺省值 —— 适配器在场景未显式给出该参数时用它填充，
+    场景显式给出的值优先。字段布局里的 Field.default 是更靠后的兜底
+    （构造响应时请求参数不可得的情况）。
 
     本条目不声明 tier：语义层由变体唯一决定（icsgen.spec.model.VARIANT_TIER），
     catalog 再声明一个 tier 会成为第二事实源，且对同时含合法变体与异常变体的
