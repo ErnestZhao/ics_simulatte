@@ -279,7 +279,39 @@ def test_tcp_session_starts_with_handshake_and_ends_with_teardown(tmp_path):
     assert flags[:3] == ["S", "SA", "A"]
     assert flags[-4:] == ["FA", "A", "FA", "A"]
     assert all(flag == "PA" for flag in flags[3:-4])
-    assert len(packets) == 3 + 2 + 4
+    # 规格 §7 指标 1：包数 == 3 + 数据帧数 + 4。pcap_frame_count 只数
+    # 产物自己的帧，所以这里不用再减握手与挥手。
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    data_frames = sum(entry["pcap_frame_count"] for entry in manifest["artifacts"])
+    assert len(packets) == 3 + data_frames + 4
+
+
+def test_data_session_mode_emits_only_data_segments(tmp_path):
+    """`session: data` 只发数据段：没有握手与挥手。
+
+    没有握手，服务端就还没发过任何段 —— 客户端首个数据段的 ack 必须是 0
+    （TCP 规定：未收到任何段的确认号为 0）。
+    """
+    from scapy.all import IP, TCP, rdpcap
+
+    from icsgen.spec.model import Operation
+
+    adapter = load_modbus_adapter()
+    scenario = Scenario(
+        name="demo",
+        transport={"kind": "tcp", "session": "data"},
+        operations=(Operation(op="modbus.read_holding_registers", params={"quantity": 3}),),
+    )
+    root = build_dataset(scenario, adapter, tmp_path / "ds", name="demo")
+    packets = rdpcap(str(root / "legit" / "modbus_tcp" / "session.pcap"))
+    flags = [p[TCP].flags for p in packets]
+    # 全是数据段：没有 S / SA / A 的握手，也没有 FA / A / FA / A 的挥手
+    assert all(flag == "PA" for flag in flags), flags
+    # 一次操作 = 请求 + 应答两包
+    assert len(packets) == 2
+    # 客户端方向的首包：ack 为 0（对端还没发过任何段）
+    client = [p[TCP] for p in packets if p[IP].src == "192.168.1.10"]
+    assert client[0].ack == 0
 
 
 def test_tcp_session_sequence_numbers_are_coherent(tmp_path):

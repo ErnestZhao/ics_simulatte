@@ -181,6 +181,37 @@ def test_generation_produces_artifacts(tmp_path):
     assert detail["percent"] == 100.0
 
 
+def test_generation_packet_count_matches_real_pcap_packets(tmp_path):
+    """事件里的包数要是 pcap 里的真实包数，不是「产物自己的帧数」之和。
+
+    TCP 会话含握手 3 包与挥手 4 包：pcap_frame_count 按规格 §6 只数产物
+    自己的帧，因此按它求和会少报 7 —— 页面上「包数」显示 2，实际 pcap 里
+    有 9 包。
+    """
+    from scapy.all import rdpcap
+
+    store = WebStore(tmp_path)
+    service = GenerationService(store)
+    config = save_config(store, _payload(count=1))
+    started = service.start(config["id"])
+    detail = _wait(started["generation_id"], service)
+    assert detail["status"] == "succeeded"
+
+    generation_dir = store.generation_dir(started["generation_id"])
+    real_packets = 0
+    for pcap in generation_dir.rglob("session.pcap"):
+        real_packets += len(rdpcap(str(pcap)))
+    # 一次操作：握手 3 + 数据 2 + 挥手 4
+    assert real_packets == 9
+
+    event = next(
+        item
+        for item in store.list_events()
+        if item.get("type") == "generation_succeeded"
+    )
+    assert event["packet_count"] == real_packets
+
+
 def test_generation_cannot_run_twice_for_same_config(tmp_path):
     store = WebStore(tmp_path)
     service = GenerationService(store)

@@ -104,7 +104,11 @@ def generate(
         typer.echo(f"场景不合法: {exc}", err=True)
         raise typer.Exit(code=1)
     adapter = load_modbus_adapter()
-    root = build_dataset(loaded, adapter, output, name=loaded.name)
+    try:
+        root = build_dataset(loaded, adapter, output, name=loaded.name)
+    except ValueError as exc:
+        typer.echo(f"场景不合法: {exc}", err=True)
+        raise typer.Exit(code=1)
     typer.echo(f"已生成数据集: {root}")
 
 

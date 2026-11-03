@@ -164,6 +164,9 @@ def write_dataset(
 
     transport 是本次会话的传输层参数，写进 manifest 后，派生数据集（如
     变异数据集）可以据此原样重建链路封装。
+
+    manifest 里的 ``sessions`` 块记录每个会话的真实包数（含握手与挥手），
+    与只数产物自身帧的 ``pcap_frame_count`` 是两个口径。
     """
     root.mkdir(parents=True, exist_ok=True)
     positions = positions or {}
@@ -235,6 +238,9 @@ def write_dataset(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "protocols": sorted({artifact.protocol for artifact in artifacts}),
         "counts": counts,
+        # 每个会话的真实包数：pcap_frame_count 只数产物自己的帧，握手与
+        # 挥手不算在内，因此「pcap 里有多少包」要单独记。
+        "sessions": {key: len(plist) for key, plist in packets.items()},
         "artifacts": entries,
     }
     if transport is not None:

@@ -1,5 +1,6 @@
 """TCP 会话序号状态机：握手、数据、挥手。"""
 
+import pytest
 from scapy.all import Ether, IP, TCP
 
 from icsgen.transport.session import CLIENT_ISN, SERVER_ISN, TcpSession
@@ -110,28 +111,22 @@ def test_sequence_number_wraps_instead_of_crashing():
     )
     packets = session.handshake()
     assert len(packets) == 3
-    assert session.client_seq < 2**32
-    assert session.server_seq < 2**32
+    # ISN 取 2**32-1，握手各消耗一个序号后回绕到 0
+    assert session.client_seq == 0
+    assert session.server_seq == 0
 
 
 def test_handshake_cannot_be_repeated():
     session = TcpSession(TransportSpec())
     session.handshake()
-    try:
+    with pytest.raises(RuntimeError):
         session.handshake()
-    except RuntimeError:
-        pass
-    else:
-        raise AssertionError("重复握手应当报错")
 
 
 def test_transport_spec_rejects_unknown_session_mode():
-    try:
+    with pytest.raises(ValueError) as info:
         TransportSpec(session="bogus")
-    except ValueError as exc:
-        assert "bogus" in str(exc)
-    else:
-        raise AssertionError("非法会话形态应当报错")
+    assert "bogus" in str(info.value)
 
 
 def test_transport_spec_defaults_to_full_session():

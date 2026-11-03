@@ -281,9 +281,14 @@ class GenerationService:
             manifest = json.loads(
                 (output_dir / "manifest.json").read_text(encoding="utf-8")
             )
-            packet_count = sum(
-                entry.get("pcap_frame_count", 0) for entry in manifest["artifacts"]
-            )
+            sessions = manifest.get("sessions")
+            if sessions is None:
+                # 旧数据集的 manifest 没有会话块：退回按产物帧数求和
+                packet_count = sum(
+                    entry.get("pcap_frame_count", 0) for entry in manifest["artifacts"]
+                )
+            else:
+                packet_count = sum(sessions.values())
             # 先落内存态，再追加事件：账本一旦出现 generation_succeeded，
             # 内存里的 phase 必须已经是 done —— 否则轮询会看到
             # 「状态成功、进度 85%」这种自相矛盾的组合

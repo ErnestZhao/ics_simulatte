@@ -60,6 +60,21 @@ def test_generate_writes_dataset(tmp_path):
     assert (out / "manifest.json").exists()
 
 
+def test_generate_rejects_invalid_session_mode(tmp_path):
+    """非法的会话形态要报错退出，而不是崩出一整屏 traceback。"""
+    scenario = tmp_path / "s.yaml"
+    scenario.write_text(
+        "name: demo\ntransport:\n  kind: tcp\n  session: bogus\noperations:\n"
+        "  - op: modbus.read_holding_registers\n    params: {quantity: 3}\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "ds"
+    result = runner.invoke(app, ["generate", str(scenario), "-o", str(out)])
+    assert result.exit_code == 1, result.output
+    assert "不合法" in result.output or "bogus" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_mutate_creates_mutated_tier(tmp_path):
     scenario = tmp_path / "s.yaml"
     scenario.write_text(
@@ -181,6 +196,41 @@ def test_replay_rule_adds_a_third_packet(tmp_path):
     # 重放的是原请求帧（前面多了 3 个握手包，索引后移）
     request = (dst / "mutated" / "modbus_tcp" / "frames" / f"{entry['id']}.bin").read_bytes()
     assert bytes(packets[5][TCP].payload) == request
+    # 规格 §6：重放类规则产生的追加帧也按同一套序号推进 —— 追加帧由客户端
+    # 发出，接在会话末尾，seq 是原请求帧的 seq 加上原请求帧的载荷长度
+    request_packet = packets[3][TCP]
+    replay_packet = packets[5][TCP]
+    assert replay_packet.seq == request_packet.seq + len(bytes(request_packet.payload))
+    assert replay_packet.flags == "PA"
+
+
+def test_mutate_preserves_data_session_mode(tmp_path):
+    """会话形态随 manifest 传到变异层：源是 data，变异层也是 data。
+
+    源数据集用 `session: data` 生成，没有握手与挥手；变异层按 manifest 里
+    记录的形态重建，因此也不该有握手与挥手。
+    """
+    from scapy.all import TCP, rdpcap
+
+    scenario = tmp_path / "s.yaml"
+    scenario.write_text(
+        "name: demo\ntransport:\n  kind: tcp\n  session: data\noperations:\n"
+        "  - op: modbus.read_holding_registers\n    params: {quantity: 3}\n",
+        encoding="utf-8",
+    )
+    src = tmp_path / "ds"
+    result = runner.invoke(app, ["generate", str(scenario), "-o", str(src)])
+    assert result.exit_code == 0, result.output
+    dst = tmp_path / "fuzz"
+    result = runner.invoke(
+        app, ["mutate", str(src), "-o", str(dst), "--rules", "all", "--seed", "42"]
+    )
+    assert result.exit_code == 0, result.output
+    packets = rdpcap(str(dst / "mutated" / "modbus_tcp" / "session.pcap"))
+    flags = [p[TCP].flags for p in packets]
+    # 变异层同样是 data 形态：全是数据段，没有握手也没有挥手
+    assert all(flag == "PA" for flag in flags), flags
+    assert len(packets) > 0
 
 
 def test_serial_dataset_pcap_uses_linux_sll(tmp_path):
