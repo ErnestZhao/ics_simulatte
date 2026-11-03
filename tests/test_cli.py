@@ -208,8 +208,8 @@ def test_serial_dataset_pcap_uses_linux_sll(tmp_path):
 
 
 def test_mutate_command_writes_full_tcp_session(tmp_path):
-    """变异层同样是一次完整的 TCP 连接：握手 → 数据 → 挥手。"""
-    from scapy.all import TCP, rdpcap
+    """变异层同样是一次完整的 TCP 连接：握手 → 数据 → 挥手，序号自洽。"""
+    from scapy.all import IP, TCP, rdpcap
 
     from icsgen.generator import build_dataset
     from icsgen.protocols.modbus.adapter import load_modbus_adapter
@@ -237,6 +237,32 @@ def test_mutate_command_writes_full_tcp_session(tmp_path):
     flags = [p[TCP].flags for p in packets]
     assert flags[:3] == ["S", "SA", "A"]
     assert flags[-4:] == ["FA", "A", "FA", "A"]
+    assert all(flag == "PA" for flag in flags[3:-4])
+    # 规格 §7 指标 3–5：序号步长、ack 与 ISN 在变异层同样成立
+    client = [p[TCP] for p in packets if p[IP].src == "192.168.1.10"]
+    server = [p[TCP] for p in packets if p[IP].src == "192.168.1.20"]
+    assert client[0].seq == 0x1000
+    assert server[0].seq == 0x2000
+    assert server[0].ack == 0x1001
+    # 同方向相邻两包的 seq 差 == 前包消耗的序号数：数据段按载荷长度，
+    # SYN 与 FIN 各占 1，纯 ACK 不消耗序号（因此相邻两包 seq 可以相同）
+    for direction in (client, server):
+        entries = [(t.seq, len(bytes(t.payload)), str(t.flags)) for t in direction]
+        for (seq, length, packet_flags), (next_seq, _, _) in zip(entries, entries[1:]):
+            if length:
+                step = length
+            elif "S" in packet_flags or "F" in packet_flags:
+                step = 1
+            else:
+                step = 0
+            assert next_seq == seq + step
+    # 每包 ack == 对端当前序号
+    data_client = [t for t in client if t.flags == "PA"]
+    data_server = [t for t in server if t.flags == "PA"]
+    assert data_client[0].ack == server[0].seq + 1
+    assert data_server[0].ack == data_client[0].seq + len(bytes(data_client[0].payload))
+    fin_client = [t for t in client if t.flags == "FA"]
+    assert fin_client[0].ack == data_server[0].seq + len(bytes(data_server[0].payload))
 
 
 def test_web_command_is_registered():

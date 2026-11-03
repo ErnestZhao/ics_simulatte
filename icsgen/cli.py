@@ -197,7 +197,7 @@ def mutate_cmd(
             builder.add_linked_packets(artifact.id, packets)
 
     for key, session in sessions.items():
-        if spec.session == "full":
+        if spec is not None and spec.session == "full":
             builder.end_session(key, session.teardown())
 
     root = builder.write()
