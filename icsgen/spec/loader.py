@@ -2,12 +2,15 @@
 
 加载链路：YAML → pydantic 校验结构 → 逐个操作查 catalog → 用 catalog 声明的
 参数 schema 校验参数 → 构造 Operation 列表。
+
+Web 表单提交走同一条校验路径（validate_operations），因此参数 schema、
+变体合法性、tier/variant 冲突的判定与错误文案在两条路径上完全一致。
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import yaml
 from jsonschema import Draft202012Validator
@@ -55,45 +58,50 @@ def _object_schema(entry: OperationEntry) -> dict[str, Any]:
     }
 
 
-def _validate_params(entry: OperationEntry, params: dict[str, Any], path: Path, index: int) -> None:
+def _operation_label(context: str | None, index: int, name: str) -> str:
+    """生成「第 N 条操作 <名字>」的定位串，context 为空时省略前缀。"""
+    prefix = f"{context} " if context else ""
+    return f"{prefix}第 {index} 条操作 {name!r}"
+
+
+def _validate_params(entry: OperationEntry, params: dict[str, Any], label: str) -> None:
     """用 catalog 声明的参数 schema 校验操作参数。"""
     if not entry.params:
         if params:
-            raise ScenarioError(
-                f"场景 {path} 第 {index} 条操作 {entry.name!r} 不接受参数，但给出了 {params}"
-            )
+            raise ScenarioError(f"{label} 不接受参数，但给出了 {params}")
         return
     validator = Draft202012Validator(_object_schema(entry))
     errors = sorted(validator.iter_errors(params), key=lambda e: list(e.path))
     if errors:
         details = "; ".join(f"{list(e.path) or '<根>'}: {e.message}" for e in errors)
-        raise ScenarioError(
-            f"场景 {path} 第 {index} 条操作 {entry.name!r} 参数校验失败：{details}"
-        )
+        raise ScenarioError(f"{label} 参数校验失败：{details}")
 
 
-def load_scenario(path: Path, catalog: Catalog) -> Scenario:
-    """加载并校验场景文件，返回 Scenario。"""
-    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    try:
-        model = ScenarioModel.model_validate(raw)
-    except ValidationError as exc:
-        raise ScenarioError(f"场景 {path} 结构不合法：{exc}") from exc
+def validate_operations(
+    catalog: Catalog,
+    items: Sequence[ScenarioOperationModel],
+    context: str | None = None,
+) -> tuple[Operation, ...]:
+    """按 catalog 校验一组操作声明，返回构造好的 Operation 列表。
 
+    context 是可选的定位前缀（如 "场景 <路径>" 或 "提交的操作"），
+    只影响错误文案，不影响判定。
+    """
     operations: list[Operation] = []
-    for index, item in enumerate(model.operations):
+    for index, item in enumerate(items):
         try:
             entry = catalog.get(item.op)
         except KeyError as exc:
             raise ScenarioError(
-                f"场景 {path} 第 {index} 条操作 {item.op!r}：catalog {catalog.protocol!r} 中不存在操作"
+                f"{_operation_label(context, index, item.op)}："
+                f"catalog {catalog.protocol!r} 中不存在操作"
             ) from exc
         if item.variant.value not in entry.variants:
             raise ScenarioError(
-                f"场景 {path} 第 {index} 条操作 {entry.name!r} 不支持的变体 {item.variant.value!r}，"
-                f"可用变体：{entry.variants}"
+                f"{_operation_label(context, index, entry.name)} 不支持的变体 "
+                f"{item.variant.value!r}，可用变体：{entry.variants}"
             )
-        _validate_params(entry, item.params, path, index)
+        _validate_params(entry, item.params, _operation_label(context, index, entry.name))
         try:
             operation = Operation(
                 op=item.op,
@@ -104,15 +112,27 @@ def load_scenario(path: Path, catalog: Catalog) -> Scenario:
             )
         except ValueError as exc:
             # tier 与 variant 冲突由 Operation 构造时发现，这里统一转成场景错误，
-            # 保证 load_scenario 对外只有 ScenarioError 一种失败形态。
+            # 保证对外只有 ScenarioError 一种失败形态。
             raise ScenarioError(
-                f"场景 {path} 第 {index} 条操作 {item.op!r} 的语义层与变体冲突：{exc}"
+                f"{_operation_label(context, index, entry.name)} 的语义层与变体冲突：{exc}"
             ) from exc
         operations.append(operation)
+    return tuple(operations)
+
+
+def load_scenario(path: Path, catalog: Catalog) -> Scenario:
+    """加载并校验场景文件，返回 Scenario。"""
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    try:
+        model = ScenarioModel.model_validate(raw)
+    except ValidationError as exc:
+        raise ScenarioError(f"场景 {path} 结构不合法：{exc}") from exc
+
+    operations = validate_operations(catalog, model.operations, context=f"场景 {path}")
 
     return Scenario(
         name=model.name,
         description=model.description,
         transport=model.transport,
-        operations=tuple(operations),
+        operations=operations,
     )

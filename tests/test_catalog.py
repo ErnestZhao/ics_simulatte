@@ -4,7 +4,12 @@ import pytest
 import yaml
 
 from icsgen.spec.catalog import Catalog, load_catalog
-from icsgen.spec.loader import ScenarioError, load_scenario
+from icsgen.spec.loader import (
+    ScenarioError,
+    ScenarioOperationModel,
+    load_scenario,
+    validate_operations,
+)
 from icsgen.spec.model import Tier, Variant
 
 
@@ -173,3 +178,55 @@ def test_load_catalog_rejects_non_object_param_schema(tmp_path):
     path = _write(tmp_path, "catalog.yaml", bad)
     with pytest.raises(ValueError, match="必须是对象"):
         load_catalog(path)
+
+
+def test_validate_operations_reports_unknown_op(tmp_path):
+    cat_path = _write(tmp_path, "catalog.yaml", CATALOG)
+    catalog = load_catalog(cat_path)
+    items = [ScenarioOperationModel(op="demo.unknown")]
+    with pytest.raises(ScenarioError, match="不存在操作"):
+        validate_operations(catalog, items)
+
+
+def test_validate_operations_reports_bad_param(tmp_path):
+    cat_path = _write(tmp_path, "catalog.yaml", CATALOG)
+    catalog = load_catalog(cat_path)
+    items = [ScenarioOperationModel(op="demo.read_holding", params={"quantity": 500})]
+    with pytest.raises(ScenarioError, match="参数校验失败"):
+        validate_operations(catalog, items)
+
+
+def test_validate_operations_rejects_unsupported_variant(tmp_path):
+    cat_path = _write(tmp_path, "catalog.yaml", CATALOG)
+    catalog = load_catalog(cat_path)
+    items = [ScenarioOperationModel(op="demo.read_holding", variant=Variant.EXCEPTION)]
+    with pytest.raises(ScenarioError, match="不支持的变体"):
+        validate_operations(catalog, items)
+
+
+def test_validate_operations_rejects_tier_variant_conflict(tmp_path):
+    cat_path = _write(tmp_path, "catalog.yaml", CATALOG)
+    catalog = load_catalog(cat_path)
+    items = [
+        ScenarioOperationModel(op="demo.read_holding", variant=Variant.BOUNDARY, tier=Tier.ABNORMAL)
+    ]
+    with pytest.raises(ScenarioError, match="冲突"):
+        validate_operations(catalog, items)
+
+
+def test_validate_operations_returns_operations(tmp_path):
+    cat_path = _write(tmp_path, "catalog.yaml", CATALOG)
+    catalog = load_catalog(cat_path)
+    items = [ScenarioOperationModel(op="demo.read_holding", params={"quantity": 3})]
+    operations = validate_operations(catalog, items)
+    assert len(operations) == 1
+    assert operations[0].params == {"quantity": 3}
+    assert operations[0].tier is Tier.LEGIT
+
+
+def test_validate_operations_context_appears_in_message(tmp_path):
+    cat_path = _write(tmp_path, "catalog.yaml", CATALOG)
+    catalog = load_catalog(cat_path)
+    items = [ScenarioOperationModel(op="demo.unknown")]
+    with pytest.raises(ScenarioError, match="提交的操作"):
+        validate_operations(catalog, items, context="提交的操作")
