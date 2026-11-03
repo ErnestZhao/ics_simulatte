@@ -214,3 +214,19 @@ def serve(
     from .server.modbus_server import run_modbus_server
 
     run_modbus_server(transport=transport, host=host, port=port, role=role)
+
+
+@app.command("web")
+def web(
+    host: str = typer.Option("127.0.0.1", "--host", help="监听地址"),
+    port: int = typer.Option(8080, "--port", help="监听端口"),
+    output: Path = typer.Option(None, "--output", help="账本与生成目录的存放位置"),
+) -> None:
+    """启动 Web 交互界面。"""
+    import uvicorn
+
+    from .web.app import create_app, default_root
+
+    root = output if output is not None else default_root()
+    typer.echo(f"Web 界面: http://{host}:{port}（数据目录 {root}）")
+    uvicorn.run(create_app(root), host=host, port=port)

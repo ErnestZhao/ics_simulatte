@@ -6,6 +6,7 @@ from scapy.all import IP
 from typer.testing import CliRunner
 
 from icsgen.cli import app
+from icsgen.web.app import default_root
 
 runner = CliRunner()
 
@@ -201,3 +202,39 @@ def test_serial_dataset_pcap_uses_linux_sll(tmp_path):
     data = (dst / "mutated" / "modbus_rtu" / "session.pcap").read_bytes()
     # SLL 头 16 字节之后是裸协议帧
     assert raw in data
+
+
+def test_web_command_is_registered():
+    result = CliRunner().invoke(app, ["web", "--help"])
+    assert result.exit_code == 0
+    assert "监听" in result.output
+
+
+def test_web_command_hands_app_to_uvicorn(tmp_path, monkeypatch):
+    """web 命令必须真的把应用交给 uvicorn —— 只测 --help 检不出空壳实现。"""
+    calls = []
+
+    def fake_run(application, **kwargs):
+        calls.append((application, kwargs))
+
+    monkeypatch.setattr("uvicorn.run", fake_run)
+    result = CliRunner().invoke(
+        app,
+        ["web", "--host", "0.0.0.0", "--port", "9000", "--output", str(tmp_path)],
+    )
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    application, kwargs = calls[0]
+    assert kwargs["host"] == "0.0.0.0"
+    assert kwargs["port"] == 9000
+    # 应用确实是 FastAPI 实例，且账本落在 --output 指的目录
+    assert application.state.store.root == tmp_path
+
+
+def test_web_command_defaults_to_default_root(monkeypatch):
+    """不给 --output 时，账本目录用默认位置。"""
+    calls = []
+    monkeypatch.setattr("uvicorn.run", lambda application, **kwargs: calls.append(application))
+    result = CliRunner().invoke(app, ["web"])
+    assert result.exit_code == 0, result.output
+    assert calls[0].state.store.root == default_root()
