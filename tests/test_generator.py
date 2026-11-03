@@ -283,7 +283,7 @@ def test_tcp_session_starts_with_handshake_and_ends_with_teardown(tmp_path):
 
 
 def test_tcp_session_sequence_numbers_are_coherent(tmp_path):
-    """双方序号各自严格递增；数据段按载荷长度推进，ack 是对端当前序号。"""
+    """同方向相邻两包的 seq 差 == 前包消耗的序号数；ack 是对端当前序号。"""
     from scapy.all import IP, TCP, rdpcap
 
     from icsgen.spec.model import Operation
@@ -306,8 +306,18 @@ def test_tcp_session_sequence_numbers_are_coherent(tmp_path):
     # + 挥手 4 包（客户端 FA/A、服务端 A/FA）= 客户端 6 包、服务端 5 包
     assert len(client) == 6
     assert len(server) == 5
-    assert [t.seq for t in client] == sorted(t.seq for t in client)
-    assert [t.seq for t in server] == sorted(t.seq for t in server)
+    # 同方向相邻两包的 seq 差 == 前包消耗的序号数：数据段按载荷长度，
+    # SYN 与 FIN 各占 1，纯 ACK 不消耗序号（因此相邻两包 seq 可以相同）
+    for direction in (client, server):
+        entries = [(t.seq, len(bytes(t.payload)), str(t.flags)) for t in direction]
+        for (seq, length, flags), (next_seq, _, _) in zip(entries, entries[1:]):
+            if length:
+                step = length
+            elif "S" in flags or "F" in flags:
+                step = 1
+            else:
+                step = 0
+            assert next_seq == seq + step
     # SYN 占掉客户端一个序号：第一个数据段的 seq 是 ISN+1
     data_client = [t for t in client if t.flags == "PA"]
     assert data_client[0].seq == 0x1001
