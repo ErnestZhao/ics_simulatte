@@ -196,22 +196,39 @@ def test_progress_callback_reports_every_interaction(tmp_path):
     assert seen == [(1, 2), (2, 2)]
 
 
-def test_transaction_id_wraps_after_65536(tmp_path):
-    """交互数量放开后事务 id 会越过 2 字节，必须取模而不是崩掉。"""
-    from icsgen.protocols.base import ProtocolFrame
+def test_transaction_id_wraps_after_65536(tmp_path, monkeypatch):
+    """交互数量放开后事务 id 会越过 2 字节，必须取模而不是崩掉。
+
+    走真实 modbus 适配器：事务 id 越界会在 MBAP 头
+    （transaction_id.to_bytes(2, "big")）抛 OverflowError，
+    这正是本用例要守住的那条崩溃路径。
+
+    链路封装与写盘与被测契约无关，打桩避免 65538 次 Scapy 封装
+    与 13 万次文件写入把单测拖到分钟级。
+    """
     from icsgen.spec.model import Operation
 
-    captured = []
+    captured: list[int] = []
+    inner = load_modbus_adapter()
 
-    class RecordingAdapter:
-        name = "modbus"
+    class CapturingAdapter:
+        """包住真实适配器：既走真实帧构建，又记录事务 id。"""
+
+        name = inner.name
 
         def build(self, op, ctx):
             captured.append(ctx.transaction_id)
-            return ProtocolFrame(payload=b"\x00\x01")
+            return inner.build(op, ctx)
 
         def build_response(self, op, ctx):
-            return None
+            return inner.build_response(op, ctx)
+
+    monkeypatch.setattr(
+        "icsgen.generator.encapsulate",
+        lambda payload, spec, seq=0, ack=0: b"\x00",
+    )
+    monkeypatch.setattr("icsgen.emit.dataset.write_raw", lambda *a, **k: None)
+    monkeypatch.setattr("icsgen.emit.dataset.write_pcap", lambda *a, **k: None)
 
     scenario = Scenario(
         name="demo",
@@ -221,7 +238,9 @@ def test_transaction_id_wraps_after_65536(tmp_path):
             for _ in range(65538)
         ),
     )
-    build_dataset(scenario, RecordingAdapter(), tmp_path / "ds", name="demo")
+    root = build_dataset(scenario, CapturingAdapter(), tmp_path / "ds", name="demo")
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    assert len(manifest["artifacts"]) == 65538
     assert len(captured) == 65538
     assert captured[65536] == 0
     assert captured[65537] == 1
