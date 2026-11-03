@@ -14,8 +14,9 @@ from ...codec.encoder import encode
 from ...codec.fields import Layout
 from ...spec.catalog import Catalog, OperationEntry, load_catalog
 from ...spec.model import Operation, Variant
-from ..base import BuildContext, OperationSpec, ProtocolFrame
+from ..base import BuildContext, FrameView, OperationSpec, ProtocolFrame
 from . import framing
+from .inspect import inspect_frame
 from .layouts import get_layout
 from .variants import DEFAULT_EXCEPTION_CODE, VariantPlan, plan_variant
 
@@ -81,6 +82,12 @@ class ModbusAdapter:
             "transport": ctx.transport,
         }
         return ProtocolFrame(payload=self._frame(response_pdu, ctx), metadata=metadata)
+
+    def inspect(self, op: str, payload: bytes, ctx: BuildContext, direction: str) -> FrameView:
+        """解析一帧请求或响应，布局按操作名定位。"""
+        entry = self.catalog.get(op)
+        layout = get_layout(entry.layout)
+        return inspect_frame(layout, payload, ctx, direction)
 
     def _plan(self, op: Operation) -> tuple[Layout, VariantPlan]:
         """解析一次操作：catalog 缺省值 + 场景参数 → 布局与取值方案。"""

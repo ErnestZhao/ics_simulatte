@@ -41,6 +41,28 @@ class OperationSpec:
     params_schema: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class FrameField:
+    """帧的一个字段及其显示值。"""
+
+    name: str
+    value: str
+
+
+@dataclass(frozen=True)
+class FrameView:
+    """一帧的协议级解析结果。
+
+    summary 是一行摘要，fields 是逐字段的解析结果。解析失败时只给摘要，
+    fields 为空 —— 畸形帧本就是数据集的一部分，预览不该因此失败。
+    """
+
+    summary: str
+    fields: tuple[FrameField, ...] = ()
+    is_exception: bool = False
+    exception_code: int | None = None
+
+
 class ProtocolAdapter(Protocol):
     """协议适配器契约。"""
 
@@ -50,3 +72,11 @@ class ProtocolAdapter(Protocol):
     def build(self, op: Operation, ctx: BuildContext) -> ProtocolFrame: ...
 
     def build_response(self, op: Operation, ctx: BuildContext) -> ProtocolFrame | None: ...
+
+    def inspect(self, op: str, payload: bytes, ctx: BuildContext, direction: str) -> FrameView:
+        """解析一帧，direction 取 "request" 或 "response"。
+
+        op 是操作名，用于定位字段布局 —— 不能按功能码反查布局：catalog 中
+        多个操作共享功能码（21 个诊断子功能共享 fc08）。
+        """
+        ...
