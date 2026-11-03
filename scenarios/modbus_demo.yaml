@@ -1,0 +1,32 @@
+name: modbus_demo
+description: Modbus 读写混合演示场景，覆盖合法、边界与异常语义
+transport:
+  kind: tcp
+  src_ip: 192.168.1.10
+  dst_ip: 192.168.1.20
+  dport: 502
+operations:
+  # 合法读
+  - op: modbus.read_holding_registers
+    params: {start_addr: 0, quantity: 3}
+    variant: normal
+  # 合法写
+  - op: modbus.write_multiple_registers
+    params: {start_addr: 100, quantity: 2, values: [57005, 48879]}
+    variant: normal
+  # 合法读回
+  - op: modbus.read_holding_registers
+    params: {start_addr: 100, quantity: 2}
+    variant: normal
+  # 边界：数量取上界
+  - op: modbus.read_holding_registers
+    params: {start_addr: 0, quantity: 125}
+    variant: boundary
+  # 异常：协议异常响应
+  - op: modbus.read_holding_registers
+    params: {start_addr: 0, quantity: 3}
+    variant: exception
+  # 异常：非法功能码（功能码取 catalog 条目声明的保留值 99）
+  - op: modbus.illegal_function_code
+    params: {quantity: 1}
+    variant: illegal_fc
