@@ -1,6 +1,7 @@
 """命令行界面。"""
 
 import json
+import socket
 
 from scapy.all import IP
 from typer.testing import CliRunner
@@ -214,27 +215,30 @@ def test_web_command_hands_app_to_uvicorn(tmp_path, monkeypatch):
     """web 命令必须真的把应用交给 uvicorn —— 只测 --help 检不出空壳实现。"""
     calls = []
 
-    def fake_run(application, **kwargs):
-        calls.append((application, kwargs))
+    def fake_run(server, sockets=None):
+        calls.append((server, sockets))
 
-    monkeypatch.setattr("uvicorn.run", fake_run)
+    monkeypatch.setattr("uvicorn.Server.run", fake_run)
     result = CliRunner().invoke(
         app,
-        ["web", "--host", "0.0.0.0", "--port", "9000", "--output", str(tmp_path)],
+        ["web", "--host", "0.0.0.0", "--port", "0", "--output", str(tmp_path)],
     )
     assert result.exit_code == 0, result.output
     assert len(calls) == 1
-    application, kwargs = calls[0]
-    assert kwargs["host"] == "0.0.0.0"
-    assert kwargs["port"] == 9000
+    server, sockets = calls[0]
+    assert server.config.host == "0.0.0.0"
     # 应用确实是 FastAPI 实例，且账本落在 --output 指的目录
-    assert application.state.store.root == tmp_path
+    assert server.config.app.state.store.root == tmp_path
+    # 监听套接字两族齐全，IPv4 与 IPv6 客户端都能进来
+    assert {sock.family for sock in sockets} == {socket.AF_INET, socket.AF_INET6}
 
 
 def test_web_command_defaults_to_default_root(monkeypatch):
     """不给 --output 时，账本目录用默认位置。"""
     calls = []
-    monkeypatch.setattr("uvicorn.run", lambda application, **kwargs: calls.append(application))
-    result = CliRunner().invoke(app, ["web"])
+    monkeypatch.setattr(
+        "uvicorn.Server.run", lambda server, sockets=None: calls.append(server)
+    )
+    result = CliRunner().invoke(app, ["web", "--port", "0"])
     assert result.exit_code == 0, result.output
-    assert calls[0].state.store.root == default_root()
+    assert calls[0].config.app.state.store.root == default_root()

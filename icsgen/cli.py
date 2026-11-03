@@ -218,7 +218,7 @@ def serve(
 
 @app.command("web")
 def web(
-    host: str = typer.Option("127.0.0.1", "--host", help="监听地址"),
+    host: str = typer.Option("127.0.0.1", "--host", help="监听地址（0.0.0.0 = IPv4 + IPv6 全地址）"),
     port: int = typer.Option(8080, "--port", help="监听端口"),
     output: Path = typer.Option(None, "--output", help="账本与生成目录的存放位置"),
 ) -> None:
@@ -226,7 +226,15 @@ def web(
     import uvicorn
 
     from .web.app import create_app, default_root
+    from .web.binding import build_listeners
 
     root = output if output is not None else default_root()
+    listeners = build_listeners(host, port)
     typer.echo(f"Web 界面: http://{host}:{port}（数据目录 {root}）")
-    uvicorn.run(create_app(root), host=host, port=port)
+    config = uvicorn.Config(create_app(root), host=host, port=port)
+    server = uvicorn.Server(config)
+    try:
+        server.run(sockets=listeners)
+    finally:
+        for listener in listeners:
+            listener.close()
