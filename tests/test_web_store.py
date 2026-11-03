@@ -101,3 +101,22 @@ def test_store_finds_generation_for_config(tmp_path):
 def test_store_generation_dir_is_under_root(tmp_path):
     store = WebStore(tmp_path)
     assert store.generation_dir("gen_1") == tmp_path / "generations" / "gen_1"
+
+
+def test_ledger_skips_non_object_lines(tmp_path):
+    """不是 JSON 对象的行不是记录，跳过 —— 单行损坏不能让页面 500。"""
+    path = tmp_path / "records.jsonl"
+    path.write_text('{"id": "a"}\n[1, 2, 3]\n"不是记录"\n42\nnull\n{"id": "b"}\n', encoding="utf-8")
+    assert [record["id"] for record in Ledger(path).read_all()] == ["a", "b"]
+
+
+def test_generation_for_config_returns_latest(tmp_path):
+    """同一配置多次发起时，两个方法必须指向同一个（最近一次）生成。"""
+    store = WebStore(tmp_path)
+    for generation_id in ("gen_1", "gen_2"):
+        store.append_event({
+            "type": "generation_started", "generation_id": generation_id,
+            "config_id": "cfg_1", "config_name": "配置", "created_at": "t0",
+        })
+    assert store.generation_for_config("cfg_1") == "gen_2"
+    assert store.generations_by_config() == {"cfg_1": "gen_2"}

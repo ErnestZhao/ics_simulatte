@@ -46,9 +46,11 @@ class Ledger:
             if not line:
                 continue
             try:
-                records.append(json.loads(line))
+                record = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if isinstance(record, dict):
+                records.append(record)
         return records
 
 
@@ -123,8 +125,8 @@ class WebStore:
         return [generations[gid] for gid in reversed(order)]
 
     def generation_for_config(self, config_id: str) -> str | None:
-        """返回该配置已发起的生成 id；未发起过返回 None。"""
-        for event in self.list_events():
+        """返回该配置最近一次发起的生成 id；未发起过返回 None。"""
+        for event in reversed(self.list_events()):
             if (
                 event.get("type") == "generation_started"
                 and event.get("config_id") == config_id
