@@ -15,8 +15,9 @@ import typer
 from .emit.dataset import Artifact, DatasetBuilder, frame_roles
 from .generator import build_dataset
 from .mutate.engine import mutate_frames
-from .protocols.modbus.adapter import CATALOG_PATH, load_modbus_adapter
-from .spec.catalog import Catalog, load_catalog
+from .protocols.modbus.adapter import load_modbus_adapter
+from .protocols.registry import get_catalog
+from .spec.catalog import Catalog
 from .spec.loader import ScenarioError, load_scenario
 from .transport.link import encapsulate
 from .transport.spec import TransportSpec
@@ -27,9 +28,10 @@ app.add_typer(ops_app, name="ops")
 
 
 def _catalog_for(protocol: str) -> Catalog:
-    if protocol != "modbus":
-        raise typer.BadParameter(f"暂不支持协议 {protocol!r}，当前仅支持 modbus")
-    return load_catalog(CATALOG_PATH)
+    try:
+        return get_catalog(protocol)
+    except KeyError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
 @ops_app.command("list")
