@@ -1,7 +1,13 @@
 """Web 层的 append-only 账本。"""
 
-import json
+import fcntl
+import logging
+import os
+import subprocess
+import sys
 import threading
+import time
+from pathlib import Path
 
 from icsgen.web.store import Ledger, WebStore
 
@@ -120,3 +126,100 @@ def test_generation_for_config_returns_latest(tmp_path):
         })
     assert store.generation_for_config("cfg_1") == "gen_2"
     assert store.generations_by_config() == {"cfg_1": "gen_2"}
+
+
+def test_ledger_survives_invalid_utf8_bytes(tmp_path):
+    """非法字节只毁掉那一行，其余记录仍要读得出来（spec §13.2）。"""
+    path = tmp_path / "records.jsonl"
+    path.write_bytes(b'{"id": "a"}\n\xff{"id": "b"}\n{"id": "c"}\n')
+    assert [record["id"] for record in Ledger(path).read_all()] == ["a", "c"]
+
+
+def test_ledger_reads_leading_bom(tmp_path):
+    """带 BOM 的文件不该丢掉首行记录。"""
+    path = tmp_path / "records.jsonl"
+    path.write_bytes(b'\xef\xbb\xbf{"id": "a"}\n{"id": "b"}\n')
+    assert [record["id"] for record in Ledger(path).read_all()] == ["a", "b"]
+
+
+def test_ledger_cross_process_appends_do_not_interleave(tmp_path):
+    """多个进程同时追加同一账本，行不能交错 —— 靠的是 flock，不是进程内锁。"""
+    path = tmp_path / "records.jsonl"
+    workers, per_worker = 4, 25
+    code = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from icsgen.web.store import Ledger\n"
+        "ledger = Ledger(Path(sys.argv[1]))\n"
+        "index = int(sys.argv[2])\n"
+        "for step in range(int(sys.argv[3])):\n"
+        "    ledger.append({'worker': index, 'step': step})\n"
+    )
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1])}
+    procs = [
+        subprocess.Popen(
+            [sys.executable, "-c", code, str(path), str(index), str(per_worker)],
+            env=env,
+        )
+        for index in range(workers)
+    ]
+    for proc in procs:
+        assert proc.wait() == 0
+    records = Ledger(path).read_all()
+    assert len(records) == workers * per_worker
+    assert {(r["worker"], r["step"]) for r in records} == {
+        (i, s) for i in range(workers) for s in range(per_worker)
+    }
+
+
+def test_ledger_append_takes_an_exclusive_file_lock(tmp_path):
+    """追加必须真的拿文件锁：别的进程持锁时追加要被挡住。
+
+    跨进程用例只保证「行不交错」，而 O_APPEND 在本地文件系统上本身就够用，
+    拿掉 flock 那个用例依然全绿 —— 这一条直接把 flock 的存在钉住。
+    """
+    path = tmp_path / "records.jsonl"
+    path.touch()
+    code = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from icsgen.web.store import Ledger\n"
+        "Ledger(Path(sys.argv[1])).append({'worker': 1, 'step': 0})\n"
+    )
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1])}
+    with path.open("a", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, "-c", code, str(path)], env=env
+            )
+            try:
+                # 子进程起动约 60ms 就走到 flock；等 1.5s 足够让「没拿锁」暴露出来
+                time.sleep(1.5)
+                assert proc.poll() is None, "追加没有等其他进程持有的文件锁"
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            assert proc.wait(timeout=30) == 0
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    assert [record["worker"] for record in Ledger(path).read_all()] == [1]
+
+
+def test_ledger_warns_on_corrupted_line(tmp_path, caplog):
+    """损坏行要告警，不能静默跳过（spec §13.2）。"""
+    path = tmp_path / "records.jsonl"
+    path.write_text('{"id": "a"}\n{坏掉的行\n{"id": "b"}\n', encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger="icsgen.web.store"):
+        records = Ledger(path).read_all()
+    assert [record["id"] for record in records] == ["a", "b"]
+    assert any("坏掉的行" in message or "不是合法 JSON" in message
+               for message in caplog.messages)
+
+
+def test_store_get_config_takes_latest_same_id(tmp_path):
+    """同 id 多次保存时，取最后一次保存的那条。"""
+    store = WebStore(tmp_path)
+    store.save_config({"id": "cfg_1", "name": "第一版"})
+    store.save_config({"id": "cfg_1", "name": "第二版"})
+    assert store.get_config("cfg_1")["name"] == "第二版"
+    assert len(store.list_configs()) == 2

@@ -1,17 +1,20 @@
 """append-only 账本：配置记录与生成事件。
 
 两份账本都只追加，不修改既有行 —— 配置记录与生成记录因此天然不可删改。
-写入用进程内锁与文件锁串行化；读取时跳过损坏行，避免单行问题拖垮整个页面。
+写入用进程内锁与文件锁串行化；读取时容错解码并跳过损坏行，避免单行问题拖垮整个页面。
 """
 
 from __future__ import annotations
 
 import fcntl
 import json
+import logging
 import os
 import threading
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class Ledger:
@@ -37,20 +40,24 @@ class Ledger:
         return record
 
     def read_all(self) -> list[dict[str, Any]]:
-        """读出全部记录；空行与解析失败的行被跳过。"""
+        """读出全部记录；空行、非法字节与解析失败的行被跳过并告警。"""
         if not self.path.exists():
             return []
         records: list[dict[str, Any]] = []
-        for line in self.path.read_text(encoding="utf-8").splitlines():
+        text = self.path.read_bytes().decode("utf-8-sig", errors="replace")
+        for number, line in enumerate(text.splitlines(), start=1):
             line = line.strip()
             if not line:
                 continue
             try:
                 record = json.loads(line)
             except json.JSONDecodeError:
+                logger.warning("跳过账本 %s 第 %d 行：不是合法 JSON", self.path, number)
                 continue
-            if isinstance(record, dict):
-                records.append(record)
+            if not isinstance(record, dict):
+                logger.warning("跳过账本 %s 第 %d 行：不是 JSON 对象", self.path, number)
+                continue
+            records.append(record)
         return records
 
 
