@@ -5004,7 +5004,7 @@ EOF
 - `plc`：基于 pymodbus 起被动应答的服务端，模拟真实 PLC 被读写
 - `client`：主动发起一组 Modbus 请求并接收响应，产出成对的请求/响应 —— 真实流量的主要来源
 
-pymodbus 3.16 的服务端 API：`from pymodbus.datastore import ModbusServerContext, ModbusDeviceContext, ModbusSequentialDataBlock` 与 `from pymodbus.server import ModbusTcpServer`（提供 `serve_forever()` 与 `shutdown()`，可编程启停）；客户端为 `from pymodbus.client import ModbusTcpClient`。
+pymodbus 3.16 的服务端 API（实测）：服务端是 asyncio 原生的 —— `ModbusTcpServer` 的构造需要正在运行的事件循环，`serve_forever()` 与 `shutdown()` 都是协程；数据存储用 `from pymodbus.simulator import SimData, SimDevice`（旧的 `ModbusServerContext` / `ModbusDeviceContext` / `ModbusSequentialDataBlock` 已废弃，v4 将移除）；客户端为 `from pymodbus.client import ModbusTcpClient`，其 `slave=` 关键字在 3.16 已改名 `device_id=`。因此同步的 start/stop 契约要包在「独立线程里的事件循环」之外。
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -5034,7 +5034,7 @@ def test_plc_server_answers_read_request():
         client = ModbusTcpClient("127.0.0.1", port=15020, timeout=3)
         client.connect()
         assert client.connected
-        result = client.read_holding_registers(0, count=4, slave=1)
+        result = client.read_holding_registers(0, count=4, device_id=1)
         assert not result.isError()
         assert len(result.registers) == 4
         client.close()
@@ -5091,21 +5091,21 @@ class PlcServer(Protocol):
 
 plc 角色被动应答，模拟被读取的现场设备；
 client 角色主动发起请求并接收响应，产出成对的请求/响应会话。
+
+pymodbus 3.16 的服务端是 asyncio 原生的：构造服务端需要一个正在运行的事件
+循环，``serve_forever`` / ``shutdown`` 都是协程。因此这里在独立线程里跑一个
+事件循环，把同步的 start / stop 契约包在它外面。
 """
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
-from typing import Any
 
 from pymodbus.client import ModbusTcpClient
-from pymodbus.datastore import (
-    ModbusDeviceContext,
-    ModbusSequentialDataBlock,
-    ModbusServerContext,
-)
 from pymodbus.server import ModbusTcpServer
+from pymodbus.simulator import DataType, SimData, SimDevice
 
 #: 模拟寄存器区的初始值
 INITIAL_REGISTER_VALUE = 0
@@ -5113,17 +5113,44 @@ INITIAL_REGISTER_VALUE = 0
 #: 保持寄存器数量
 HOLDING_REGISTER_COUNT = 1000
 
+#: 线圈与离散输入的数量
+BIT_COUNT = 1000
 
-def _build_context() -> ModbusServerContext:
-    """构造 pymodbus 服务端上下文。"""
-    block = ModbusSequentialDataBlock(0, [INITIAL_REGISTER_VALUE] * HOLDING_REGISTER_COUNT)
-    device = ModbusDeviceContext(
-        di=block,
-        co=block,
-        ir=block,
-        hr=block,
+#: 等待服务端开始监听的超时时间（秒）
+STARTUP_TIMEOUT = 5.0
+
+
+def _build_device(unit_id: int) -> SimDevice:
+    """构造被模拟的设备。
+
+    线圈、离散输入、保持寄存器、输入寄存器是四块独立区域，各自从地址 0
+    开始编号。
+    """
+    coils = SimData(address=0, count=BIT_COUNT, values=False, datatype=DataType.BITS)
+    discrete_inputs = SimData(
+        address=0, count=BIT_COUNT, values=False, datatype=DataType.BITS
     )
-    return ModbusServerContext(devices=device, single=True)
+    holding_registers = SimData(
+        address=0,
+        count=HOLDING_REGISTER_COUNT,
+        values=INITIAL_REGISTER_VALUE,
+        datatype=DataType.REGISTERS,
+    )
+    input_registers = SimData(
+        address=0,
+        count=HOLDING_REGISTER_COUNT,
+        values=INITIAL_REGISTER_VALUE,
+        datatype=DataType.REGISTERS,
+    )
+    return SimDevice(
+        id=unit_id,
+        simdata=(
+            [coils],
+            [discrete_inputs],
+            [holding_registers],
+            [input_registers],
+        ),
+    )
 
 
 class ModbusPlcServer:
@@ -5143,8 +5170,11 @@ class ModbusPlcServer:
         self.role = role
         self.unit_id = unit_id
         self._server: ModbusTcpServer | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+        self._ready = threading.Event()
+        self._error: BaseException | None = None
 
     @property
     def address(self) -> str:
@@ -5157,22 +5187,51 @@ class ModbusPlcServer:
             self._thread = threading.Thread(target=self._run_client, daemon=True)
             self._thread.start()
             return
-        self._server = ModbusTcpServer(
-            context=_build_context(),
-            address=(self.host, self.port),
-        )
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._serve, daemon=True)
         self._thread.start()
+        # 监听就绪前不返回：调用方拿到服务后就应当能连上
+        if not self._ready.wait(timeout=STARTUP_TIMEOUT):
+            raise RuntimeError(f"Modbus 服务端未能在 {self.address} 上开始监听")
+        if self._error is not None:
+            raise self._error
 
     def stop(self) -> None:
         """停止服务。"""
         self._stop_event.set()
-        if self._server is not None:
-            self._server.shutdown()
-            self._server = None
+        if self._loop is not None and self._server is not None:
+            future = asyncio.run_coroutine_threadsafe(self._server.shutdown(), self._loop)
+            try:
+                future.result(timeout=STARTUP_TIMEOUT)
+            except Exception:  # noqa: BLE001 —— 关停失败不应掩盖原始异常
+                pass
         if self._thread is not None:
-            self._thread.join(timeout=3)
+            self._thread.join(timeout=STARTUP_TIMEOUT)
             self._thread = None
+        self._server = None
+        self._loop = None
+
+    def _serve(self) -> None:
+        """在独立线程里跑事件循环。"""
+        assert self._loop is not None
+        asyncio.set_event_loop(self._loop)
+        try:
+            self._loop.run_until_complete(self._serve_async())
+        except BaseException as exc:  # noqa: BLE001 —— 启动失败要传回调用方
+            self._error = exc
+            self._ready.set()
+
+    async def _serve_async(self) -> None:
+        """监听并应答，直到被关闭。"""
+        server = ModbusTcpServer(
+            context=_build_device(self.unit_id),
+            address=(self.host, self.port),
+        )
+        self._server = server
+        # background=True：只负责开始监听，后续由 serving 事件控制生命周期
+        await server.serve_forever(background=True)
+        self._ready.set()
+        await server.serving
 
     def _run_client(self) -> None:
         """主动请求模式：发起一组读写操作并接收响应。"""
@@ -5190,9 +5249,9 @@ class ModbusPlcServer:
     def _exchange(self, client: ModbusTcpClient) -> None:
         """执行一轮读写交互。"""
         try:
-            client.read_holding_registers(0, count=8, slave=self.unit_id)
-            client.write_register(0, value=0x1234, slave=self.unit_id)
-            client.read_input_registers(0, count=8, slave=self.unit_id)
+            client.read_holding_registers(0, count=8, device_id=self.unit_id)
+            client.write_register(0, value=0x1234, device_id=self.unit_id)
+            client.read_input_registers(0, count=8, device_id=self.unit_id)
         except OSError:
             time.sleep(0.2)
 
@@ -5512,12 +5571,15 @@ EOF
 **编写过程中发现并已修正的问题**：
 
 1. `duplicate_replay` 与 `interleave_frames` 需要成对输入，单帧时返回 `None`；原测试断言"每条规则都产生变异"对这两条不成立 —— 已在 Task 10 的测试中把它们排除并单独断言空结果。
-2. `ModbusTcpServer` 没有 `start()` 方法，只有 `serve_forever()` 与 `shutdown()`；原先用线程包裹 `StartTcpServer` 的写法停止不可靠 —— 已改为 `ModbusTcpServer` + `shutdown()`。
+2. `ModbusTcpServer` 没有 `start()` 方法，只有 `serve_forever()` 与 `shutdown()`；原先用线程包裹 `StartTcpServer` 的写法停止不可靠 —— 已改为 `ModbusTcpServer` + `shutdown()`。按 pymodbus 3.16 实测再修正：`serve_forever()` 与 `shutdown()` 都是**协程**，且服务端构造需要一个正在运行的事件循环，因此同步的 start/stop 契约必须包在「独立线程里的事件循环」之外（详见第 7 条）。
 3. 响应数组的长度无法从请求字段直接推导（FC03 响应的 values 会算成 0 个元素）—— 已给 `Field` 增加 `len_from_request` 声明，并把 `_build_response` 改为两遍处理（先数组、后长度字段）。
 4. **请求内数组的长度必须跟随同帧的计数标量** —— FC0F/FC10/FC17 的请求数组与长度字段互为环状引用，唯一不自相矛盾的依据是同帧的计数标量（`quantity` / `write_quantity`）。布局用 `len_from_request` 声明这条协议结构关系，变体层把数组对齐到计数标量推出的长度（不足补零、超出截断）。**字节布局不变** —— 编解码内核不读这两个字段。
 5. **计划原本只产请求帧，没有响应帧** —— 与 spec §7「异常响应作为独立 variant 生成」、§11.1「请求+响应连续」、§16「验证请求-响应成对」矛盾，且 Task 9 的文档字符串已宣称「保持会话内请求/响应连续」。已补上响应路径：Task 7 的 `TransportSpec.reversed()`、Task 9 的 `Artifact.response` 与 `pcap_resp_index`、Task 11 的 `ModbusAdapter.build_response`。**一次操作仍 = 一个 Artifact**，覆盖度计数不变。
 6. **写字节的变异规则可能写出与原值相同的字节** —— 引擎有 `mutated == payload` 的丢弃逻辑，于是「规则没生效」会变成**静默的空结果**（`byte_set` 命中 1/256、`func_code_corrupt` 命中 1/255、两个 16 位字段各命中 1/65536），测试 `test_every_rule_produces_a_mutation` 会随机失败。已引入 `_different_value(current, rng, candidates)`，凡是写字节的规则都先从候选值里排除原值再写回。
+7. **计划里的 pymodbus 3.16 写法有三处与实际 API 不符** —— 实测 3.16.1 后修正：(a) 客户端的 `slave=` 关键字已改名 `device_id=`；(b) 服务端是 asyncio 原生的，`serve_forever()` / `shutdown()` 都是协程且构造需要运行中的事件循环，改为在独立线程里跑事件循环，`start()` 等待监听就绪后才返回；(c) `ModbusServerContext` / `ModbusDeviceContext` / `ModbusSequentialDataBlock` 已废弃（v4 将移除），改用 `SimData` / `SimDevice`；其中 `ModbusSequentialDataBlock(0, ...)` 在 3.16 会因内部起始地址减一而抛 `TypeError`。
 
 **遗留说明**：`duplicate_replay` 与 `interleave_frames` 在 P1 保持"单帧不适用"，成对帧的变异留待 P2 起引入多帧场景后实现；届时需同步更新 Task 10 的测试与 `icsgen.mutate` 的输入接口（当前只接受单帧字节）。
+
+**另一处遗留**：变异数据集（`icsgen mutate`）只落 `frames/`，没有 `session.pcap` —— CLI 的 mutate 命令只登记 Artifact，没有为变异帧挂链路包。三个语义层里只有 mutated 层的目录结构与 legit/abnormal 不一致。要补齐需要解决一个信息缺口：manifest 没有记录源数据集的传输层参数（源/目的 IP、端口），无法原样重建链路封装；可选做法是生成时把 TransportSpec 写进 manifest，变异时据此重建。
 
 
