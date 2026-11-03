@@ -1054,6 +1054,7 @@ git commit -m "fix: 事务 id 与序列号取模，并给生成流程加进度�
 """Web 层的 append-only 账本。"""
 
 import json
+import threading
 
 from icsgen.web.store import Ledger, WebStore
 
@@ -1082,6 +1083,28 @@ def test_ledger_skips_corrupted_lines(tmp_path):
 
 def test_ledger_read_all_on_missing_file(tmp_path):
     assert Ledger(tmp_path / "nope.jsonl").read_all() == []
+
+
+def test_ledger_concurrent_appends_do_not_interleave(tmp_path):
+    """并发追加不能互相交错 —— 每一行都得是完整的一条 JSON（spec §13.1）。"""
+    ledger = Ledger(tmp_path / "records.jsonl")
+    thread_count, per_thread = 4, 20
+
+    def worker(index: int) -> None:
+        for step in range(per_thread):
+            ledger.append({"thread": index, "step": step})
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(thread_count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    records = ledger.read_all()
+    assert len(records) == thread_count * per_thread
+    assert {(r["thread"], r["step"]) for r in records} == {
+        (i, s) for i in range(thread_count) for s in range(per_thread)
+    }
 
 
 def test_store_saves_and_fetches_config(tmp_path):
@@ -1355,6 +1378,7 @@ from icsgen.web.service import (
     NotFound,
     WebError,
     GenerationService,
+    _percent,
     artifact_detail,
     build_scenario,
     generation_detail,
@@ -1454,6 +1478,16 @@ def test_save_config_rejects_total_over_limit(tmp_path):
     )
     with pytest.raises(WebError, match="超过总量上限"):
         save_config(store, payload)
+
+
+def test_percent_converts_two_phase_progress():
+    """进度换算：构建阶段 0–85，写盘阶段 85，完成 100（spec §10.2）。"""
+    assert _percent(0, 10, "building") == 0.0
+    assert _percent(5, 10, "building") == 42.5
+    assert _percent(10, 10, "building") == 85.0
+    assert _percent(10, 10, "writing") == 85.0
+    assert _percent(10, 10, "done") == 100.0
+    assert _percent(0, 0, "building") == 0.0
 
 
 def test_build_scenario_expands_count(tmp_path):
@@ -1929,7 +1963,7 @@ def artifact_detail(
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `python3 -m pytest tests/test_web_service.py -q`
-Expected: 全部通过（16 个用例）
+Expected: 全部通过（15 个用例）
 
 - [ ] **Step 6: 跑全量测试**
 
@@ -2403,7 +2437,7 @@ def create_app(root: Path | None = None) -> FastAPI:
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `python3 -m pytest tests/test_web_api.py -q`
-Expected: 全部通过（13 个用例）
+Expected: 全部通过（12 个用例）
 
 - [ ] **Step 5: 跑全量测试**
 
