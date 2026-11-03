@@ -122,6 +122,8 @@ transport:
   同样带握手与挥手；重放类规则产生的追加帧也按同一套序号推进。
 - **manifest**：`pcap_index` 指向请求包所在序号（因握手前导，偏移 3），
   `pcap_resp_index == pcap_index + 1` 不变；`pcap_frame_count` 仍只数产物自己的帧。
+  另加 `sessions` 块（会话键 → 该会话 pcap 的真实包数，含握手与挥手）——
+  「pcap 里有多少包」与「产物占了几帧」是两个口径，Web 层的「包数」用前者。
 - **Web 预览**：只展示 manifest 里的 `pcap_index`，不按字节下标进 pcap，偏移无影响。
 
 ## 7. 验收指标（可自动判定）
