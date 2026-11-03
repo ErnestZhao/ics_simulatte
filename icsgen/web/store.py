@@ -228,9 +228,12 @@ class RootOwnerLock:
     def __del__(self) -> None:
         """对象被回收时关掉句柄。
 
+        **这段兜底不能删** —— 句柄不关会在 GC 时触发
+        `ResourceWarning: 未关闭的文件`，在 `-W error` 下直接变成测试失败
+        （实测删掉后 `tests/test_web_service.py` 塌成 10 failed）。
+
         锁必须活到服务实例结束 —— 句柄提前关掉等于悄悄把锁释放了，
-        让另一个实例以为自己是目录所有者。回收时把 fd 关掉，同时
-        避免留下「未关闭的文件」的 ResourceWarning。
+        让另一个实例以为自己是目录所有者。
         """
         handle = getattr(self, "_handle", None)
         if handle is None:
@@ -240,4 +243,6 @@ class RootOwnerLock:
         try:
             handle.close()
         except Exception:  # 解释器退出期间关闭可能失败，忽略即可
+            # 这里刻意不记日志：解释器退出期模块全局可能被拆掉，
+            # 调用 logging 反而会在 __del__ 里抛出「Exception ignored」。
             pass
