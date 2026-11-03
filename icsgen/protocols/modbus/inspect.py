@@ -63,14 +63,26 @@ def inspect_frame(
 
     func_code = pdu[0]
     if func_code & 0x80:
-        code = pdu[1] if len(pdu) > 1 else None
-        fields = [
-            *header,
-            FrameField("功能码", f"0x{func_code:02X}"),
-            FrameField("异常码", str(code)),
-        ]
+        base_code = func_code & 0x7F
+        # 线上字节带异常位（fc | 0x80），基础功能码才是它响应的那个功能码。
+        # 两者都要说清楚，否则摘要与字段表里的「功能码」看着自相矛盾。
+        fields = [*header, FrameField("功能码", f"0x{func_code:02X}")]
+        if len(pdu) > 1:
+            code = pdu[1]
+            fields.append(FrameField("异常码", str(code)))
+            summary = (
+                f"Modbus 异常响应（基础功能码 0x{base_code:02X}，线上字节 0x{func_code:02X}），"
+                f"异常码 {code}"
+            )
+        else:
+            # 异常码字节缺失：不编造显示值，直接说明该字节不存在。
+            code = None
+            summary = (
+                f"Modbus 异常响应（基础功能码 0x{base_code:02X}，线上字节 0x{func_code:02X}），"
+                "异常码缺失"
+            )
         return FrameView(
-            summary=f"Modbus 异常响应，功能码 0x{func_code & 0x7F:02X}，异常码 {code}",
+            summary=summary,
             fields=tuple(fields),
             is_exception=True,
             exception_code=code,

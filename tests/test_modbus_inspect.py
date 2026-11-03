@@ -46,6 +46,34 @@ def test_inspect_detects_exception_response():
     assert "0x03" in view.summary
 
 
+def test_inspect_exception_summary_distinguishes_base_code_and_wire_byte():
+    """摘要里的基础功能码与线上字节要分得清，别让用户以为数据自相矛盾。"""
+    pdu = build_pdu(0x83, b"\x02")
+    frame = build_mbap(1, 0xFF, pdu)
+    layout = get_layout("fc03")
+    view = inspect_frame(layout, frame, BuildContext(transport="tcp"), "response")
+    assert "0x03" in view.summary
+    assert "0x83" in view.summary
+    # 字段表的「功能码」是线上字节 —— 协议事实。
+    assert _field_map(view)["功能码"] == "0x83"
+    assert "None" not in view.summary
+
+
+def test_inspect_exception_without_code_byte_omits_field():
+    """异常响应只有功能码字节时，异常码字段不存在，也不能显示成 None。"""
+    pdu = build_pdu(0x83, b"")
+    frame = build_mbap(1, 0xFF, pdu)
+    layout = get_layout("fc03")
+    view = inspect_frame(layout, frame, BuildContext(transport="tcp"), "response")
+    fields = _field_map(view)
+    assert "异常码" not in fields
+    assert view.exception_code is None
+    assert "None" not in view.summary
+    assert "异常码缺失" in view.summary
+    assert "0x03" in view.summary
+    assert "0x83" in view.summary
+
+
 def test_inspect_rtu_frame_reports_unit_id():
     pdu = build_pdu(3, b"\x00\x00\x00\x03")
     frame = build_rtu(0x11, pdu)
