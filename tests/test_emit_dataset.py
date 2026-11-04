@@ -268,3 +268,14 @@ def test_begin_session_rejects_a_started_session(tmp_path):
         pass
     else:
         raise AssertionError("已经起头的会话不应再插入前导包")
+
+
+def test_end_session_rejects_empty_teardown(tmp_path):
+    """空的收尾包是调用方的 bug —— 静默接受会让会话少一次挥手。"""
+    builder = DatasetBuilder("demo", tmp_path / "ds")
+    try:
+        builder.end_session("legit/modbus_tcp", [])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("空的收尾包不应被接受")

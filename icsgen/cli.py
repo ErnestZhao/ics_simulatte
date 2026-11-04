@@ -103,12 +103,18 @@ def generate(
     except ScenarioError as exc:
         typer.echo(f"场景不合法: {exc}", err=True)
         raise typer.Exit(code=1)
-    adapter = load_modbus_adapter()
+    # 传输参数单独验：TransportSpec 是取值的唯一事实源，构造器验得住就
+    # 别拖到构建阶段才炸。场景的操作参数已由 load_scenario 按 catalog 校验过，
+    # 因此这里剩下的用户输入问题只有传输配置这一处。
     try:
-        root = build_dataset(loaded, adapter, output, name=loaded.name)
-    except ValueError as exc:
-        typer.echo(f"场景不合法: {exc}", err=True)
+        TransportSpec.from_dict(loaded.transport)
+    except (TypeError, ValueError) as exc:
+        typer.echo(f"传输配置不合法: {exc}", err=True)
         raise typer.Exit(code=1)
+    adapter = load_modbus_adapter()
+    # 构建阶段不再兜 ValueError：那里面剩下的都是框架自己的不变式
+    # （帧数对不上、会话前导包重复插入之类），是 bug，不该伪装成场景错误。
+    root = build_dataset(loaded, adapter, output, name=loaded.name)
     typer.echo(f"已生成数据集: {root}")
 
 

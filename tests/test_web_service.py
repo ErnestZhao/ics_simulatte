@@ -446,3 +446,17 @@ def test_save_config_rejects_invalid_session_mode(tmp_path):
         save_config(store, payload)
     assert "bogus" in str(excinfo.value)
     assert store.list_configs() == []
+
+
+def test_save_config_rejects_unknown_transport_kind(tmp_path):
+    """非法传输种类同样要在写账本之前报错。"""
+    store = WebStore(tmp_path)
+    payload = ConfigPayload(
+        name="非法种类",
+        transport={"kind": "carrier-pigeon"},
+        operations=[OperationInput(op="modbus.read_holding_registers", count=1)],
+    )
+    with pytest.raises(WebError) as excinfo:
+        save_config(store, payload)
+    assert "carrier-pigeon" in str(excinfo.value)
+    assert store.list_configs() == []

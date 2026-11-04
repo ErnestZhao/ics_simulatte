@@ -22,6 +22,22 @@ SERVER_ISN = 0x2000
 _SEQUENCE_MODULO = 2**32
 
 
+def _check_isn(value: int, name: str) -> int:
+    """校验初始序号。
+
+    初始序号必须是 32 位无符号整数 —— 越界的值一路带到 Scapy 才炸成
+    struct.error，在那里看不出是谁给的。构造时就拦住，错误信息才说得清
+    是哪个序号、越界多少。
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} 必须是整数，收到 {value!r}")
+    if not 0 <= value < _SEQUENCE_MODULO:
+        raise ValueError(
+            f"{name} 必须在 0..{_SEQUENCE_MODULO - 1} 之间，收到 {value}"
+        )
+    return value
+
+
 class TcpSession:
     """一条 TCP 连接的序号状态机。
 
@@ -37,8 +53,8 @@ class TcpSession:
         server_isn: int = SERVER_ISN,
     ) -> None:
         self.spec = spec
-        self._client_seq = client_isn
-        self._server_seq = server_isn
+        self._client_seq = _check_isn(client_isn, "client_isn")
+        self._server_seq = _check_isn(server_isn, "server_isn")
         self._server_spoke = False
         self._handshaked = False
 
@@ -59,7 +75,7 @@ class TcpSession:
         packets: list[bytes] = []
         # SYN 占用客户端一个序号；服务端此时还没发过东西，ack 为 0
         packets.append(
-            encapsulate(b"", self.spec, seq=self._client_seq, ack=self._ack_to_server(), flags="S")
+            encapsulate(b"", self.spec, seq=self._client_seq, ack=self._client_ack(), flags="S")
         )
         self._client_seq = (self._client_seq + 1) % _SEQUENCE_MODULO
         # SYN-ACK 同样占用服务端一个序号
@@ -85,7 +101,7 @@ class TcpSession:
         """一个数据段。outgoing 为 True 表示客户端发出。"""
         if outgoing:
             packet = encapsulate(
-                payload, self.spec, seq=self._client_seq, ack=self._ack_to_server(), flags="PA"
+                payload, self.spec, seq=self._client_seq, ack=self._client_ack(), flags="PA"
             )
             self._client_seq = (self._client_seq + len(payload)) % _SEQUENCE_MODULO
             return packet
@@ -117,8 +133,8 @@ class TcpSession:
         )
         return packets
 
-    def _ack_to_server(self) -> int:
-        """客户端数据段的 ack：服务端还没发过东西时是 0。
+    def _client_ack(self) -> int:
+        """客户端方向包里要填的 ack：服务端还没发过东西时是 0。
 
         只有客户端方向需要这个标志：服务端在客户端发出第一个数据段之前没发过
         任何东西，此时客户端的 ack 必须是 0（TCP 规定：未收到任何段的确认号

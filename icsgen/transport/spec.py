@@ -8,6 +8,9 @@ from typing import Any, Mapping
 #: 未指定源端口时的起始端口，后续按会话递增
 DEFAULT_SOURCE_PORT = 40001
 
+#: 传输种类：tcp / udp / serial
+TRANSPORT_KINDS = ("tcp", "udp", "serial")
+
 #: 会话形态：full = 握手 + 数据 + 挥手；data = 只发数据段
 SESSION_MODES = ("full", "data")
 
@@ -27,7 +30,15 @@ class TransportSpec:
     session: str = "full"
 
     def __post_init__(self) -> None:
-        """会话形态取值必须合法 —— 取值集合只在传输层声明一处。"""
+        """取值必须合法 —— 取值集合只在传输层声明一处。
+
+        传输种类与会话形态都在这里校验：构造器是唯一的事实源，早失败
+        总比拖到封装层才炸好 —— 那里的报错看不出是哪个字段写错了。
+        """
+        if self.kind not in TRANSPORT_KINDS:
+            raise ValueError(
+                f"未知的传输种类 {self.kind!r}，可用：{list(TRANSPORT_KINDS)}"
+            )
         if self.session not in SESSION_MODES:
             raise ValueError(
                 f"未知的会话形态 {self.session!r}，可用：{list(SESSION_MODES)}"

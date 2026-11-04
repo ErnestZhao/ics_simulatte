@@ -129,6 +129,33 @@ def test_transport_spec_rejects_unknown_session_mode():
     assert "bogus" in str(info.value)
 
 
+def test_transport_spec_rejects_unknown_kind():
+    """传输种类也在传输层校验 —— 别等封装层才炸。"""
+    with pytest.raises(ValueError) as info:
+        TransportSpec(kind="carrier-pigeon")
+    assert "carrier-pigeon" in str(info.value)
+
+
 def test_transport_spec_defaults_to_full_session():
     assert TransportSpec().session == "full"
     assert TransportSpec().to_dict()["session"] == "full"
+
+
+@pytest.mark.parametrize("bad_isn", [-1, 2**32, 2**33])
+def test_initial_sequence_number_must_fit_in_32_bits(bad_isn):
+    """初始序号越界要在构造时就被拦下，而不是拖到 Scapy 打包才炸。"""
+    with pytest.raises(ValueError) as info:
+        TcpSession(TransportSpec(), client_isn=bad_isn)
+    assert "client_isn" in str(info.value)
+
+
+def test_initial_sequence_number_must_be_an_integer():
+    with pytest.raises(TypeError) as info:
+        TcpSession(TransportSpec(), server_isn="0x2000")
+    assert "server_isn" in str(info.value)
+
+
+def test_initial_sequence_number_rejects_bool():
+    """True 是 int 的子类，但当序号用是错的 —— 不能被静默接受成 1。"""
+    with pytest.raises(TypeError):
+        TcpSession(TransportSpec(), client_isn=True)

@@ -129,6 +129,8 @@ class DatasetBuilder:
 
     def end_session(self, key: str, packets: list[bytes]) -> None:
         """会话的收尾包（TCP 挥手）。"""
+        if not packets:
+            raise ValueError(f"会话 {key!r} 的收尾包不能为空")
         self._packets.setdefault(key, []).extend(packets)
 
     def write(self) -> Path:

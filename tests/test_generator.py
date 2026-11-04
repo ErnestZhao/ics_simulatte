@@ -334,6 +334,47 @@ def test_data_session_mode_emits_only_data_segments(tmp_path):
     assert client[0].ack == 0
 
 
+def test_udp_dataset_pairs_request_and_response(tmp_path):
+    """UDP 链路：没有握手挥手，但请求与响应仍然成对进出同一会话。
+
+    UDP 没有序号，所以走的是与 TCP 不同的分支 —— 直接封装，不建会话状态机。
+    这里守住那条分支：载荷仍是 Modbus MBAP 帧，方向由端口对调体现。
+    """
+    from scapy.all import IP, UDP, rdpcap
+
+    from icsgen.spec.model import Operation
+
+    adapter = load_modbus_adapter()
+    scenario = Scenario(
+        name="demo",
+        transport={"kind": "udp"},
+        operations=(Operation(op="modbus.read_holding_registers", params={"quantity": 3}),),
+    )
+    root = build_dataset(scenario, adapter, tmp_path / "ds", name="demo")
+    packets = rdpcap(str(root / "legit" / "modbus_tcp" / "session.pcap"))
+    # 一次操作 = 请求 + 应答两包，没有握手也没有挥手
+    assert len(packets) == 2
+    assert all(UDP in packet for packet in packets)
+    # 请求从客户端端口发往服务端端口，应答原路返回
+    request, response = packets
+    assert (request[UDP].sport, request[UDP].dport) == (40001, 502)
+    assert (response[UDP].sport, response[UDP].dport) == (502, 40001)
+    assert request[IP].src == "192.168.1.10"
+    assert response[IP].src == "192.168.1.20"
+    # 载荷是纯 Modbus MBAP 帧
+    assert bytes(request[UDP].payload)[7] == 0x03
+
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    # 链路类型记在 manifest 的传输块里：产物的 transport 字段是协议的
+    # 传输名（tcp/rtu，指 MBAP 还是 CRC 组帧），链路是 TCP 还是 UDP
+    # 由这一块说了算。
+    assert manifest["transport"]["kind"] == "udp"
+    entry = manifest["artifacts"][0]
+    assert entry["transport"] == "tcp"
+    assert entry["pcap_index"] == 0
+    assert entry["pcap_resp_index"] == 1
+
+
 def test_tcp_session_sequence_numbers_are_coherent(tmp_path):
     """同方向相邻两包的 seq 差 == 前包消耗的序号数；ack 是对端当前序号。"""
     from scapy.all import IP, TCP, rdpcap

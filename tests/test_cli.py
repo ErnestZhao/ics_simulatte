@@ -75,6 +75,22 @@ def test_generate_rejects_invalid_session_mode(tmp_path):
     assert "Traceback" not in result.output
 
 
+def test_generate_rejects_unknown_transport_kind(tmp_path):
+    """非法的传输种类要报错退出，而不是崩出一整屏 traceback。"""
+    scenario = tmp_path / "s.yaml"
+    scenario.write_text(
+        "name: demo\ntransport:\n  kind: carrier-pigeon\noperations:\n"
+        "  - op: modbus.read_holding_registers\n    params: {quantity: 3}\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "ds"
+    result = runner.invoke(app, ["generate", str(scenario), "-o", str(out)])
+    assert result.exit_code == 1, result.output
+    assert "传输配置不合法" in result.output
+    assert "carrier-pigeon" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_mutate_creates_mutated_tier(tmp_path):
     scenario = tmp_path / "s.yaml"
     scenario.write_text(
