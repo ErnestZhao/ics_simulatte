@@ -227,12 +227,13 @@ ItemData：
 ### 5.1 请求消息结构
 
 ```
-service         1 字节（通用服务）或 2 字节（连接管理器服务）
-service_data    变长
+service         1 字节（所有 CIP 服务码都是 1 字节）
 path_size       1 字节，路径长度，单位是 2 字节
 path            path_size × 2 字节
 data            变长
 ```
+
+> 请求里没有保留字节，也没有 `service_data` —— 数据永远在路径之后。
 
 ### 5.2 响应消息结构
 
@@ -262,42 +263,64 @@ data            变长
 
 ### 5.4 EPATH 段
 
-| 段类型 | 含义 |
-|---|---|
-| 0x20 / 0x21 / 0x24 / 0x25 / 0x26 | 逻辑段：class(8) / instance(16) / attribute(16) / element count(16) / service id(8) |
-| 0x00 / 0x01 | 网络段：1 字节 / 2 字节 |
-| 0x80 / 0x81 / 0x82 / 0x83 | 符号段：8 位 / 16 位 / 32 位 / 符号名 |
-| 0xA1 / 0xA2 / 0xA3 | 数据段：8 位 / 16 位 / 32 位 |
-| 0x01 | 端口段（2 字节） |
+段类型字节的高 3 位是段族（掩码 `0xE0`），中间 2 位是逻辑段种类（掩码
+`0x1C`），低 2 位是取值格式（0 = 8 位，1 = 16 位，2 = 32 位）。
 
-典型路径 `0x20 <class> 0x24 <instance> 0x30 <attribute>`：逻辑 8 位 class 段、
-逻辑 16 位 instance 段、符号 16 位 attribute 段。
+| 段族 | 段类型 | 含义 |
+|---|---|---|
+| 0x00 | 0x00 / 0x01 | 端口段：1 字节 / 2 字节 |
+| 0x20 | 0x20 / 0x21 | 逻辑段 class：8 位 / 16 位 |
+| 0x20 | 0x24 / 0x25 | 逻辑段 instance：8 位 / 16 位 |
+| 0x20 | 0x28 / 0x29 | 逻辑段 member：8 位 / 16 位 |
+| 0x20 | 0x2C / 0x2D | 逻辑段 connection point：8 位 / 16 位 |
+| 0x20 | 0x30 / 0x31 | 逻辑段 attribute：8 位 / 16 位 |
+| 0x20 | 0x34 | 逻辑段 special |
+| 0x20 | 0x38 | 逻辑段 service id |
+| 0x40 | 0x40 / 0x41 / 0x42 | 网络段：8 位 / 16 位 / 32 位 |
+| 0x60 | 0x60 / 0x61 / 0x62 / 0x6B | 符号段：8 位 / 16 位 / 32 位 / 符号名 |
+| 0x80 | 0x80 / 0x91 | 数据段：简单数据段 / ANSI 扩展符号段 |
+
+逻辑段采用 ODVA 的**非紧凑形式**（每个段的取值从字边界开始：16 位段是
+「类型字节 | 补齐字节 | 值」，32 位段是「类型字节 | 补齐字节 | 4 字节值」）。
+
+典型路径 `0x20 <class8> 0x25 0x00 <instance16> 0x31 0x00 <attribute16>`：
+逻辑 8 位 class 段、逻辑 16 位 instance 段、逻辑 16 位 attribute 段。
+实例号因此落在 CIP 体内偏移 6。
 
 ### 5.5 服务码表
 
-**通用服务（1 字节）**：0x01 Get_Attributes_All、0x02 Set_Attributes_All、
-0x03 Get_Attribute_Single、0x04 Set_Attribute_Single、0x05 Reset、0x06 Start、0x07 Stop、
-0x08 Create、0x09 Delete、0x0A Multiple_Service_Packet、0x0B Apply_Attributes、
-0x0D Get_Attribute_Single_Set、0x0E Set_Attribute_Single_Set、
-0x10 Get_Attribute_Single_All、0x11 Set_Attribute_Single_All、
-0x14 Enter_Set_Attribute_Mode、0x15 Exit_Set_Attribute_Mode、
-0x16 Start_Application、0x17 Start_Session、0x18 Start_Session_All、
-0x19 Get_Instance_Attribute_List、0x1A Set_Instance_Attribute_List、
-0x1B Get_Instance_Attribute_List_All、
-0x20 Read_Tag、0x21 Read_Modify_Write_Tag、0x23 Write_Tag、
-0x24 Read_Modify_Write_Tag_Fragmented、0x52 Unconnected_Send。
+**所有 CIP 服务码都是 1 字节**（掩码 `0x7F`，最高位留给响应标志）。
 
-**连接管理器服务（2 字节）**：0x0001 Forward_Open、0x0002 Forward_Close、
-0x0003 Unconnected_Send、0x0004 Unconnected_Send_RRU、0x0005 Set_Config_Parameter、
-0x0006 Get_Config_Parameter、0x0007 ListIdentity、0x0008 ListServices、
-0x0009 ListInterfaces、0x000A RegisterSession、0x000B UnRegisterSession、
-0x000C ListIdentity_All、0x000D ListInterfaces_All、0x0013 Close_Forward_Open。
+**通用服务（23 个）**：0x01 Get_Attributes_All、0x02 Set_Attributes_All、
+0x05 Reset、0x06 Start、0x07 Stop、0x08 Create、0x09 Delete、
+0x0A Multiple_Service_Request、0x0D Apply_Attributes、0x0E Get_Attribute_Single、
+0x10 Set_Attribute_Single、0x20 Get_Attribute_Single_Set、0x21 Set_Attribute_Single_Set、
+0x22 Get_Attribute_Single_All、0x23 Set_Attribute_Single_All、
+0x24 Enter_Set_Attribute_Mode、0x25 Exit_Set_Attribute_Mode、
+0x26 Start_Application、0x27 Start_Session、0x28 Start_Session_All、
+0x29 Get_Instance_Attribute_List、0x2A Set_Instance_Attribute_List、
+0x2B Get_Instance_Attribute_List_All。
+
+**标签服务（4 个，Rockwell Logix 的 CIP 标签服务）**：0x4C Read_Tag、
+0x4D Write_Tag、0x4E Read_Modify_Write_Tag、0x4F Read_Modify_Write_Tag_Fragmented。
+
+**连接管理器服务（15 个）**：0x52 Unconnected_Send、0x54 Forward_Open、
+0x60 Forward_Close、0x61 Unconnected_Send_RRU、0x62 Set_Config_Parameter、
+0x63 Get_Config_Parameter、0x64 CIM_ListIdentity、0x65 CIM_ListServices、
+0x66 CIM_ListInterfaces、0x67 CIM_RegisterSession、0x68 CIM_UnRegisterSession、
+0x69 CIM_ListIdentity_All、0x6A CIM_ListInterfaces_All、0x6B Close_Forward_Open、
+0x6C Unconnected_Send_Common。
+
+> ODVA 只定义了连接管理器里的 `Forward_Open`（0x54）与 `Unconnected_Send`
+> （0x52），其余 13 个分配合成码 0x60–0x6C。合成码与 ENIP 封装命令
+> （0x0063–0x0066、0x006F）数值相近，但封装命令是 2 字节 `code_width`，
+> 两个数值空间靠 `code_width` 区分。
 
 ---
 
 ## 6. 操作目录（P2.3）
 
-### 6.1 清单（42 个操作类型）
+### 6.1 清单（48 个操作类型：6 个封装层 + 42 个 CIP 应用层）
 
 **ENIP 封装层命令（6 个）**
 
@@ -309,6 +332,13 @@ data            变长
 | `enip.register_session` | 0x0065 | 注册会话 |
 | `enip.unregister_session` | 0x0066 | 注销会话 |
 | `enip.send_rr_data` | 0x006F | 发送请求-响应数据（承载 CIP 消息） |
+
+**CIP 应用层（42 个 = 通用 23 + 标签 4 + 连接管理器 15）**
+
+目录里的操作分两类：6 个**封装层操作**（ENIP 帧 + 该命令自己的数据块）
+与 42 个 **CIP 应用层操作**（ENIP SendRRData 帧承载服务码 + 路径 + 数据）。
+两类靠 catalog 的 `code_width` 区分（封装层 2 字节、CIP 1 字节），避免两个
+服务码数值空间撞车。
 
 **CIP 通用服务（23 个）**
 
@@ -345,14 +375,16 @@ data            变长
 
 | 变体组 | 操作类型数 | 变体 | 小计 |
 |---|---|---|---|
-| 带参数的服务 | 30 | normal + boundary + exception | 90 |
-| 无参数的服务 | 12 | normal + exception | 24 |
-| **合计** | **42** | | **114** |
+| 带参数的服务 | 16 | normal + boundary + exception | 48 |
+| 无参数的服务 | 32 | normal + exception | 64 |
+| **合计** | **48** | | **112** |
 
-114 ≥ 110（§15 的 P2 门槛）。CI 断言 `icsgen catalog --protocol enip --count` ≥ 110。
+112 ≥ 110（§15 的 P2 门槛）。CI 断言 `icsgen catalog --protocol enip --count` ≥ 110。
 
-**边界变体的参数上界**：`instance_id` 0xFFFFFFFF、`attribute_id` 0xFFFF、
+**边界变体的参数上界**：`instance_id` 0xFFFF、`attribute_id` 0xFFFF、
 `class_id` 0xFF、`tag_count` 8（规范上限）、`data_length` 由 `maxItems` 声明。
+上界必须与承载它的字节宽度一致 —— `instance_id` 由 16 位 instance 段承载，
+取 0xFFFFFFFF 会被静默截断成 0xFFFF，边界变体就会谎报自己的取值。
 上界一律写在 catalog 的参数 schema 里，与 Modbus 一致（变体规划读 schema 的
 `maximum` / `maxItems`）。
 
@@ -483,7 +515,7 @@ fields:
 | 风险 | 缓解 |
 |---|---|
 | CIP 的服务数据格式记错 | 每个服务在 catalog 里声明布局；布局由单元测试逐字节对照规范；Scapy 只覆盖封装层，缺口在测试里显式标注 |
-| 覆盖条目数凑不够 110 | 42 个操作类型已在清单里定死；实现时变体集按 §6.2 的分组给足 |
+| 覆盖条目数凑不够 110 | 48 个操作类型已在清单里定死；实现时变体集按 §6.2 的分组给足 |
 | codec 扩字段类型影响 Modbus | 新类型不被既有布局引用；既有测试必须全绿 |
 | 变异层白名单让 Modbus 变异产物变化 | 白名单取到的偏移与旧硬编码一致；既有变异测试逐字节比对 |
 | ENIP 服务端缺位 | 本期明确不做（§1.3），挪到 P5 —— P5 的定义就是真实流量采集 |
